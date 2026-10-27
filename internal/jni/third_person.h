@@ -35,7 +35,7 @@ struct Api {
     bool loaded=false;
     bool load(mango_chams::Api::Resolve resolve,mango_chams::Api& api){
         if(loaded)return true;objects=&api;
-#define TP_BIND(member,name) member=reinterpret_cast<decltype(member)>(resolve(name));if(!member)return false
+#define TP_BIND(member,name) member=reinterpret_cast<decltype(member)>(resolve(name));if(!member){if(api.log)api.log("missing icall: " name);return false;}
         TP_BIND(position,"UnityEngine.Transform::get_position_Injected(System.IntPtr,UnityEngine.Vector3&)");
         TP_BIND(set_position,"UnityEngine.Transform::set_position_Injected(System.IntPtr,UnityEngine.Vector3&)");
         TP_BIND(rotation,"UnityEngine.Transform::get_rotation_Injected(System.IntPtr,UnityEngine.Quaternion&)");
@@ -336,7 +336,7 @@ public:
         applied_mask_=int(body_view?(uint32_t(original_mask_)|layers)&~hidden:uint32_t(original_mask_));
         if(current!=applied_mask_)api.set_mask(camera,applied_mask_);mask_owned_=true;status=1;
         if(time>=next_report_){
-            next_report_=time+5.;
+            next_report_=time+2.;
             int used=std::snprintf(report_,sizeof(report_),
                 "TP travel=%.2f wanted=%.2f body_view=%d renderers=%zu body_meshes=%u primary=%zu fallback_animator=%d fp_root=%d mask=%08x->%08x |",
                 travel,wanted,body_view,renderers_.size(),body_meshes,model_.primary().size(),fallback_animator_!=0,fp_root_known_,

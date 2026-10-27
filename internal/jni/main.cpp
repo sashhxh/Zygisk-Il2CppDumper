@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdarg>
 #include <exception>
 #include <mutex>
 #include <thread>
@@ -37,7 +38,40 @@
 #include "unity_fields.h"
 extern "C" int oxide_bypass_install(uint32_t);
 extern "C" int oxide_bypass_tick();
-#define LOG(...) __android_log_print(ANDROID_LOG_INFO,"MANGOcheat",__VA_ARGS__)
+// Every line goes to logcat and to a text file the user can read without adb:
+//   /data/user/<n>/<package>/files/mango_log.txt   (root)
+//   /sdcard/Android/data/<package>/files/mango_log.txt
+namespace {
+std::mutex file_log_mutex;
+FILE* file_log_handles[2]={nullptr,nullptr};
+double file_log_retry=0;
+void file_log_paths(char (&a)[256],char (&b)[256]){
+    const unsigned user=unsigned(getuid())/100000;
+    std::snprintf(a,sizeof(a),"/data/user/%u/com.catsbit.oxidesurvivalisland/files/mango_log.txt",user);
+    std::snprintf(b,sizeof(b),"/storage/emulated/%u/Android/data/com.catsbit.oxidesurvivalisland/files/mango_log.txt",user);
+}
+}
+extern "C" void mango_file_log(const char* tag,const char* line){
+    std::lock_guard<std::mutex> lock(file_log_mutex);
+    const double t=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if(t>=file_log_retry&&(!file_log_handles[0]||!file_log_handles[1])){
+        file_log_retry=t+5;char a[256],b[256];file_log_paths(a,b);
+        if(!file_log_handles[0])file_log_handles[0]=std::fopen(a,"w");
+        if(!file_log_handles[1])file_log_handles[1]=std::fopen(b,"w");
+    }
+    for(int i=0;i<2;++i){
+        FILE* f=file_log_handles[i];
+        if(!f)continue;
+        std::fprintf(f,"%.3f [%s] %s\n",t,tag,line);std::fflush(f);
+        if(std::ftell(f)>3*1024*1024){char a[256],b[256];file_log_paths(a,b);std::fclose(f);file_log_handles[i]=std::fopen(i?b:a,"w");}
+    }
+}
+static void mango_log(const char* format,...) __attribute__((format(printf,1,2)));
+static void mango_log(const char* format,...){
+    char line[1024];va_list args;va_start(args,format);std::vsnprintf(line,sizeof(line),format,args);va_end(args);
+    __android_log_write(ANDROID_LOG_INFO,"MANGOcheat",line);mango_file_log("MANGOcheat",line);
+}
+#define LOG(...) mango_log(__VA_ARGS__)
 namespace mango {
 constexpr const char* package="com.catsbit.oxidesurvivalisland";
 // Identifies the loaded library in the startup log.
@@ -661,12 +695,17 @@ void* raw_named_reference(void* object,const char* name){
 }
 void prepare_chams(){
     if(chams_api.loaded||(!want_chams.load()&&!want_third_person.load()))return;
+    // A failed bind is retried slowly; it used to retry (and log) every frame.
+    static double next_try=0;
+    if(now()<next_try)return;
+    next_try=now()+5;
     chams_api.decode=raw_decode_object;
     chams_api.find=[](int32_t id)->void*{return raw_fn<Obj*(*)(int32_t,const Method*)>(0xD4C4960)(id,nullptr);};
     chams_api.read=raw_read;
     // Object/array/renderer pointers read through field() come straight from
     // Unity in the same callback; dereference them instead of one syscall each.
     chams_api.direct=true;chams_api.clock=now;
+    chams_api.log=[](const char* message){LOG("%s",message);};
     chams_api.named_ref=raw_named_reference;
     chams_api.store_ref=[](uintptr_t at,void* value){
         std::memcpy(reinterpret_cast<void*>(at),&value,sizeof(value));
@@ -728,9 +767,16 @@ V3 camera_position_hook(Obj* self,const Method* method){
 }
 bool prepare_camera(){
     if(!want_third_person.load())return camera_api.loaded;
-    if(!chams_api.loaded)return false;
+    static bool logged_chams_api=false,logged_camera_api=false;
+    if(!chams_api.loaded){
+        if(!logged_chams_api){logged_chams_api=true;LOG("Third person: object API (chams_api) is not loaded, camera disabled");}
+        return false;
+    }
     const auto resolve=raw_fn<mango_chams::Api::Resolve>(mango_offsets::resolve_icall);
-    if(!camera_api.load(resolve,chams_api))return false;
+    if(!camera_api.load(resolve,chams_api)){
+        if(!logged_camera_api){logged_camera_api=true;LOG("Third person: camera icall binding failed (see 'missing icall' above)");}
+        return false;
+    }
     camera_api.collision=camera_collision_distance;camera_api.collision_context=&camera_collision;
     if(!camera_sphere)camera_sphere=reinterpret_cast<SphereCast>(resolve("UnityEngine.PhysicsScene::Query_SphereCast_Injected(UnityEngine.PhysicsScene&,UnityEngine.Vector3&,System.Single,UnityEngine.Vector3&,System.Single,UnityEngine.RaycastHit&,System.Int32,UnityEngine.QueryTriggerInteraction)"));
     if(!original_camera_position){
@@ -1171,13 +1217,32 @@ void raw_publish(int phase=0){
         mango_chams::Options options{want_chams.load(),true,chams_alpha.load(),chams_range.load(),unsigned(chams_limit.load())};
         const double chams_start=now();
         chams_controller.update(chams_api,options,candidates,time);
-        if(options.enabled)record_cost(chams_us_total,chams_us_max,chams_samples,chams_start);
+        if(options.enabled){
+            record_cost(chams_us_total,chams_us_max,chams_samples,chams_start);
+            static double last_chams_log=0;
+            if(time-last_chams_log>=2){
+                last_chams_log=time;const auto& d=chams_controller.diag;
+                LOG("Chams: status=%d shader_kind=%d candidates=%zu actors=%u renderers=%u scanned_nodes=%u found=%u fail[no_native=%u slots=%u tint=%u backup=%u] swaps=%u states[visible=%u occluded=%u unknown=%u] materials=%u id_failures=%u restore_errors=%u",
+                    chams_controller.status,chams_controller.shader_kind,candidates.size(),d.actors,chams_controller.renderer_count,d.nodes,d.found,
+                    d.no_native,d.bad_slots,d.no_tint,d.no_backup,d.swaps,d.state_visible,d.state_occluded,d.state_unknown,
+                    chams_controller.material_creations,chams_api.id_failures,chams_controller.restore_errors);
+            }
+        }
         chams_status.store(chams_controller.status);chams_renderers.store(chams_controller.renderer_count);
         chams_shader.store(chams_controller.shader_kind);
         chams_creations.store(chams_controller.material_creations);chams_restore_errors.store(chams_controller.restore_errors);
     }
     {std::lock_guard<std::mutex> lock(snapshot_mutex);published.assign(next);}
     player_features_tick(time);
+    static double last_diag=0;
+    if(time-last_diag>=2){
+        last_diag=time;
+        size_t observed=0;{std::lock_guard<std::mutex> lock(raw_observations_mutex);observed=raw_observations.size();}
+        LOG("Diag: phase=%d frame=%d local=%d camera=%d list_valid=%d registry=%d players=%zu observed=%zu draw=%d | third_person=%d status=%d camera_api=%d meshes=%u | chams=%d status=%d api=%d | session=%llu",
+            phase,frame,local!=nullptr,camera!=nullptr,list_valid,registry_healthy.load(),current.size(),observed,want_esp.load(),
+            want_third_person.load(),camera_controller.status,camera_api.loaded,camera_meshes.load(),
+            want_chams.load(),chams_controller.status,chams_api.loaded,static_cast<unsigned long long>(raw_session.generation()));
+    }
     unsigned cost=unsigned(std::max(0.0,(now()-time)*1000000));
     capture_samples.fetch_add(1);capture_total_us.fetch_add(cost);
     unsigned old=max_publish_us.load();while(old<cost&&!max_publish_us.compare_exchange_weak(old,cost)){}
@@ -1652,6 +1717,7 @@ void boot(){
     char cmd[256]{};FILE* f=std::fopen("/proc/self/cmdline","r");if(f){std::fread(cmd,1,sizeof(cmd)-1,f);std::fclose(f);}
     if(std::strcmp(cmd,package)){LOG("Wrong process: %s",cmd);return;}
     load_config();sync_config();
+    LOG("boot: pid=%d uid=%u revision=%s",int(getpid()),unsigned(getuid()),revision_marker);
     raw_observations.reserve(max_players);
     LOG("MANGOcheat ESP %s build %s %s package=%s",revision_marker,__DATE__,__TIME__,package);void* attached=nullptr;
     for(unsigned attempts=0;;++attempts){

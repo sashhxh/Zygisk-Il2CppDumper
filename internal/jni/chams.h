@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <cmath>
 #include <vector>
 #include <deque>
@@ -49,6 +50,7 @@ struct Api {
     void(*store_ref)(uintptr_t,void*)=nullptr;
     // Monotonic seconds. Null means "no wall-clock limit" (host tests).
     double(*clock)()=nullptr;
+    void(*log)(const char*)=nullptr; // diagnostics only
     // Every pointer handed to field() was returned by Unity a moment ago
     // (FindObjectFromInstanceID, a decoded handle, a freshly allocated array),
     // so it can be dereferenced instead of paying a syscall for each read.
@@ -63,7 +65,7 @@ struct Api {
     mutable int8_t renderer_spelling[2]{0,0};
     bool load(Resolve resolve){
         if(loaded)return true;
-#define CH_BIND(member,name) member=reinterpret_cast<decltype(member)>(resolve(name));if(!member)return false
+#define CH_BIND(member,name) member=reinterpret_cast<decltype(member)>(resolve(name));if(!member){if(log)log("missing icall: " name);return false;}
         CH_BIND(game_object,"UnityEngine.Component::get_gameObject_Injected(System.IntPtr)");
         CH_BIND(transform,"UnityEngine.Component::get_transform_Injected(System.IntPtr)");
         CH_BIND(component,"UnityEngine.GameObject::GetComponentByName_Injected(System.IntPtr,UnityEngine.Bindings.ManagedSpanWrapper&)");
@@ -90,7 +92,7 @@ struct Api {
         CH_BIND(set_flags,"UnityEngine.Object::set_hideFlags_Injected(System.IntPtr,UnityEngine.HideFlags)");
         CH_BIND(destroy,"UnityEngine.Object::Destroy_Injected(System.IntPtr,System.Single)");
         auto get_id_offset=reinterpret_cast<int(*)()>(resolve("UnityEngine.Object::GetOffsetOfInstanceIDInCPlusPlusObject()"));
-        if(!get_id_offset)return false;
+        if(!get_id_offset){if(log)log("missing icall: GetOffsetOfInstanceIDInCPlusPlusObject");return false;}
         const int offset=get_id_offset();native_id_offset=offset>=0&&offset<=256&&offset%4==0?offset:-1;
         if(read)force_off_offset=mango_unity::force_rendering_offset(reinterpret_cast<uintptr_t>(set_force_off),read);
 #undef CH_BIND
@@ -208,12 +210,18 @@ class Controller {
                 // property. Hidden/Internal-Colored ships in the player's builtin
                 // resources and declares _ZTest/_ZWrite/_Cull/_SrcBlend/_DstBlend
                 // as ordinary properties, so ZTest Always is honoured per material.
+                // FindBuiltin only searches the player's builtin resource table
+                // ("unity default resources"). UI/Default lives in the main data file
+                // instead, so that lookup most likely returned null in r11 and no
+                // material was ever replaced.
                 auto colored=span(u"Hidden/Internal-Colored");shader_=api.returned_id(api.shader(&colored));
                 if(shader_)shader_kind=5;
                 else{
                     auto ui=span(u"UI/Default");shader_=api.returned_id(api.shader(&ui));
-                    if(!shader_)return false;shader_kind=4;
+                    if(shader_)shader_kind=4;
                 }
+                if(api.log){char note[96];std::snprintf(note,sizeof(note),"Chams shader: Internal-Colored/UI-Default -> kind=%d id=%d",shader_kind,int(shader_));api.log(note);}
+                if(!shader_)return false;
             }else{
             auto name=span(u"Universal Render Pipeline/Unlit");shader_=api.returned_id(api.shader(&name));
             if(shader_)shader_kind=1;
@@ -279,21 +287,21 @@ class Controller {
     }
     bool add_renderer(Api& api,Actor& actor,int32_t id){
         if(!id||actor.renderers.size()>=48||std::any_of(actor.renderers.begin(),actor.renderers.end(),[&](const Renderer& r){return r.id==id;}))return false;
-        void* native=api.live(id);if(!native)return false;
-        void* array=api.materials(native);const int count=api.count(array);if(count<=0||count>16)return false;
+        void* native=api.live(id);if(!native){++diag.no_native;return false;}
+        void* array=api.materials(native);const int count=api.count(array);if(count<=0||count>16){++diag.bad_slots;return false;}
         Renderer renderer;renderer.id=id;renderer.native=reinterpret_cast<uintptr_t>(native);
         for(int i=0;i<count;++i){
             const int32_t original=api.id(api.item(array,i));
             if(!original||owned(original)||!prepare_tints(api,original)){
-                for(const auto& slot:renderer.slots)release(api,slot,false);return false;
+                ++diag.no_tint;for(const auto& slot:renderer.slots)release(api,slot,false);return false;
             }
             const int32_t copy=backup(api,original);
-            if(!copy){for(const auto& slot:renderer.slots)release(api,slot,false);return false;}
+            if(!copy){++diag.no_backup;for(const auto& slot:renderer.slots)release(api,slot,false);return false;}
             renderer.slots.push_back({original,copy});
         }
         if(requested_xray_&&api.occlusion){renderer.occlusion=api.occlusion(native);renderer.occlusion_owned=true;api.set_occlusion(native,false);}
         if(requested_xray_&&api.force_off_offset>=0){renderer.force_owned=true;renderer.force_off=api.field<uint8_t>(native,size_t(api.force_off_offset))!=0;api.set_force_off(native,false);}
-        actor.renderers.push_back(std::move(renderer));return true;
+        actor.renderers.push_back(std::move(renderer));++diag.found;return true;
     }
     bool rebind(Api& api,Renderer& renderer,void* array,int count){
         if(count<=0||count>16)return false;
@@ -310,6 +318,8 @@ class Controller {
     }
 public:
     int status=0,shader_kind=0;unsigned renderer_count=0,material_creations=0,restore_errors=0;
+    // Why nothing is painted: counted per failure reason, logged by the host.
+    struct Diag {unsigned actors=0,nodes=0,found=0,no_native=0,bad_slots=0,no_tint=0,no_backup=0,swaps=0,state_visible=0,state_occluded=0,state_unknown=0;} diag;
     void reset(Api& api){
         if(!api.loaded)return;
         for(auto& actor:actors_)restore(api,actor);actors_.clear();
@@ -326,6 +336,8 @@ public:
         candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const Candidate& c){return !c.owner||!c.root||!std::isfinite(c.meters)||c.meters>options.range;}),candidates.end());
         std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b){return a.meters<b.meters;});
         if(candidates.size()>std::min(options.limit,32u))candidates.resize(std::min(options.limit,32u));
+        diag.state_visible=diag.state_occluded=diag.state_unknown=0;
+        for(const auto& c:candidates)++(c.visibility==0?diag.state_visible:c.visibility==1?diag.state_occluded:diag.state_unknown);
         for(auto it=actors_.begin();it!=actors_.end();){
             if(std::none_of(candidates.begin(),candidates.end(),[&](const Candidate& c){return c.owner==it->owner&&c.root==it->root&&c.model==it->model;})){
                 restore(api,*it);it=actors_.erase(it);
@@ -350,7 +362,7 @@ public:
                 if(c.model){const int32_t model=api.returned_id(api.transform(reinterpret_cast<void*>(c.model)));if(model&&model!=root)actor.queue.push_front(model);}
             }
             while(nodes&&new_renderers&&!actor.queue.empty()&&actor.visited.size()<768&&!api.expired(scan_deadline)){
-                --nodes;const int32_t node=actor.queue.front();actor.queue.pop_front();
+                --nodes;++diag.nodes;const int32_t node=actor.queue.front();actor.queue.pop_front();
                 if(!actor.visited.insert(node).second)continue;
                 void* transform=api.live(node);if(!transform)continue;
                 void* object=api.native_return(api.game_object(transform));
@@ -372,7 +384,7 @@ public:
                     bool changed=count!=int(r->slots.size()),game_changed=changed;
                     for(int i=0;i<count;++i){const int32_t id=api.id(api.item(array,i));if(id!=tint_[state])changed=true;if(!owned(id)&&(size_t(i)>=r->slots.size()||id!=r->slots[i].original))game_changed=true;}
                     if(game_changed&&!rebind(api,*r,array,count)){++restore_errors;++r;continue;}
-                    if(changed){for(int i=0;i<count;++i)api.put(array,i,tint_[state]);api.set_materials(native,array,count);}
+                    if(changed){for(int i=0;i<count;++i)api.put(array,i,tint_[state]);api.set_materials(native,array,count);++diag.swaps;}
                     // GetSharedMaterialArray allocates a managed array on every call;
                     // a visibility change is handled immediately above, so the
                     // periodic re-check only has to notice a game-side re-skin.
@@ -382,6 +394,7 @@ public:
             }
         }
         if(!candidates.empty())discovery_cursor_=(discovery_cursor_+1)%candidates.size();
+        diag.actors=unsigned(actors_.size());
         colors(api,options);status=renderer_count?1:(shader_attempted_&&!shader_?-2:0);
     }
 };

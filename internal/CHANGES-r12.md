@@ -30,3 +30,12 @@
 ## Логи (`logcat -s MANGOcheat`)
 - `TP travel=... body_view=... renderers=... [id Lслой fp|body en off sh]` раз в 5 с: сразу видно, почему тела нет.
 - `Cost: third_person avg/max us, chams avg/max us` раз в ~15 с: сколько мс на главном потоке съедает каждая фича.
+
+## r12.1: лог в файл
+- Все строки лога пишутся ещё и в `/data/user/0/com.catsbit.oxidesurvivalisland/files/mango_log.txt`
+  (и в `/sdcard/Android/data/<pkg>/files/mango_log.txt`). `start.sh` через 6 с копирует его в `/sdcard/Download/mango_log.txt`.
+- Строки диагностики каждые 2 с: `Diag:` (local/camera/players), `Chams:` (кандидаты, найденные рендереры, причины отказов, шейдер), `TP ...`, `Cost:`.
+- `missing icall: ...` — если не нашёлся какой-то Unity-биндинг.
+- Вероятная причина «чамсы не работают совсем»: `Shader.FindBuiltin` ищет только в таблице builtin-ресурсов
+  (`unity default resources`), а `UI/Default` лежит в основном data-файле -> шейдер не находился, ни один материал не менялся.
+  `Hidden/Internal-Colored` лежит именно в `unity default resources`.

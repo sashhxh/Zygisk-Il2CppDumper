@@ -45,6 +45,7 @@
 
 #define EXPORT extern "C" __attribute__((visibility("default")))
 
+extern "C" void mango_file_log(const char* tag, const char* line);
 namespace oxide {
 constexpr uint32_t kActk = 1;
 constexpr uint32_t kDepth = 2;
@@ -60,6 +61,14 @@ void log(const char* format, ...) {
     va_list args;
     va_start(args, format);
 #if defined(__ANDROID__)
+    {
+        char line[512];
+        va_list copy;
+        va_copy(copy, args);
+        std::vsnprintf(line, sizeof(line), format, copy);
+        va_end(copy);
+        mango_file_log("OxideBypass", line);
+    }
     __android_log_vprint(ANDROID_LOG_INFO, "OxideBypass", format, args);
 #else
     std::fputs("[OxideBypass] ", stderr);

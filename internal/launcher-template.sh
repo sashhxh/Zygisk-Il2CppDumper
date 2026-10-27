@@ -176,6 +176,16 @@ if "$RUNTIME/cfinject" "$PACKAGE" "$LIBRARY"; then
         printf '%s\n' 'dlopen выполнен, библиотека присутствует в процессе игры.' \
             'Появление меню проверяй в игре.'
         printf 'Логи только нового процесса: logcat --pid=%s -s Unity MANGOcheat OxideBypass\n' "$GAME_PID"
+        LOG_FILE="/data/user/$USER_ID/$PACKAGE/files/mango_log.txt"
+        printf 'Лог-файл: %s\n' "$LOG_FILE"
+        printf 'Скопировать в Download: su -c "cp %s /sdcard/Download/mango_log.txt"\n' "$LOG_FILE"
+        sleep 6
+        if [ -r "$LOG_FILE" ]; then
+            cp "$LOG_FILE" /sdcard/Download/mango_log.txt 2>/dev/null \
+                && printf '%s\n' 'Лог скопирован: /sdcard/Download/mango_log.txt' || :
+        else
+            printf '%s\n' 'Лог-файл пока не создан: библиотека ещё не стартовала или нет доступа к files/.'
+        fi
     else
         fail 'После загрузки процесс завершился или библиотека отсутствует. Нужен logcat.'
     fi
