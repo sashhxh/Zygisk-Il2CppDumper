@@ -1,0 +1,42 @@
+{
+  "shell_syntax_checked": true,
+  "payload_shell_extraction_verified": true,
+  "cli_guards_verified": true,
+  "app_library_staging_tests_passed": true,
+  "restart_tests_passed": true,
+  "source_files_unchanged": false,
+  "revision": "r11-xray-live-model",
+  "game_version": "1.16.11978",
+  "game_build_id": "46686291bd5f3e0f3505d35d727c7ef2e9f36446",
+  "native_bindings_verified": 57,
+  "fixed_code_anchors_verified": 41,
+  "tests": {
+    "chams_material_rebinding_armor_16_meshes_and_restore_asan_ubsan": true,
+    "local_model_activation_animator_culling_restore_and_rig_fallback_asan_ubsan": true,
+    "native_state_signature_guards_and_metadata_bounds_asan_ubsan": true,
+    "registry_projection_asan_ubsan": true,
+    "unity_handle_decode_asan_ubsan": true,
+    "named_elf_guards_asan_ubsan": true,
+    "visibility_native_bindings_mocked": true
+  },
+  "visibility_code_unchanged_from_r10": true,
+  "configuration_code_unchanged_from_r10": true,
+  "readme_modified": false,
+  "android_device_tested": false,
+  "gpu_render_tested": false,
+  "fps_gain_measured": false,
+  "payload_sha256": {
+    "cfinject": "fc8357179d9f13f81a3b9e1845e4891310994b8faf2c8b1fe7ad5d19bffc00de",
+    "libcfesp.so": "4486b563b011f0238cfa09fc2367050a469376055f6336bb85f478f52c497c6e"
+  },
+  "script_sha256": "1fc8c28de522086ffde1eccd0eb3af3019cae303fe5265f662cecd9e3a6cf140",
+  "limits": {
+    "chams_hierarchy_nodes_per_tick": 64,
+    "chams_new_renderers_per_tick": 4,
+    "chams_tick_hz": 10,
+    "renderers_per_character": 48,
+    "hierarchy_nodes_per_character": 768,
+    "camera_collision_casts_per_frame": 4,
+    "visibility_rays_per_frame": 8
+  }
+}
