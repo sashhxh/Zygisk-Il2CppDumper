@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <string>
 #include <cmath>
 #include <vector>
 #include <deque>
@@ -26,7 +27,8 @@ struct Api {
     void*(*component)(void*,Span*)=nullptr;
     int(*child_count)(void*)=nullptr;
     void*(*child)(void*,int)=nullptr;
-    void*(*shader)(Span*)=nullptr;
+    void*(*shader)(Span*)=nullptr;        // Shader.FindBuiltin: builtin resources only
+    void*(*find_shader)(Span*)=nullptr;   // ResourcesAPIInternal.FindShaderByName: what Shader.Find calls
     int(*property)(Span*)=nullptr;
     void(*set_shader)(void*,void*)=nullptr;
     void(*set_float)(void*,int,float)=nullptr;
@@ -91,6 +93,8 @@ struct Api {
         CH_BIND(set_pass,"UnityEngine.Material::SetShaderPassEnabled_Injected(System.IntPtr,UnityEngine.Bindings.ManagedSpanWrapper&,System.Boolean)");
         CH_BIND(set_flags,"UnityEngine.Object::set_hideFlags_Injected(System.IntPtr,UnityEngine.HideFlags)");
         CH_BIND(destroy,"UnityEngine.Object::Destroy_Injected(System.IntPtr,System.Single)");
+        find_shader=reinterpret_cast<decltype(find_shader)>(resolve("UnityEngine.ResourcesAPIInternal::FindShaderByName_Injected(UnityEngine.Bindings.ManagedSpanWrapper&)"));
+        if(!find_shader&&log)log("missing icall: ResourcesAPIInternal::FindShaderByName (falling back to FindBuiltin)");
         auto get_id_offset=reinterpret_cast<int(*)()>(resolve("UnityEngine.Object::GetOffsetOfInstanceIDInCPlusPlusObject()"));
         if(!get_id_offset){if(log)log("missing icall: GetOffsetOfInstanceIDInCPlusPlusObject");return false;}
         const int offset=get_id_offset();native_id_offset=offset>=0&&offset<=256&&offset%4==0?offset:-1;
@@ -100,6 +104,12 @@ struct Api {
     }
     double deadline(double seconds)const{return clock?clock()+seconds:1e300;}
     bool expired(double deadline)const{return clock&&clock()>=deadline;}
+    // Shader.Find(name) semantics (all shaders in the player), then builtin resources.
+    void* shader_by_name(Span* name)const{
+        void* result=find_shader?find_shader(name):nullptr;
+        if(!result&&shader)result=shader(name);
+        return result;
+    }
     template<class T>T field(void* object,size_t offset)const{
         T value{};if(!object)return value;
         const uintptr_t at=reinterpret_cast<uintptr_t>(object)+offset;
@@ -154,7 +164,8 @@ class Controller {
     float alpha_=-1;bool xray_=false;double last_tick_=-1;
     int32_t shader_=0;
     bool shader_attempted_=false;
-    bool requested_xray_=false;
+    bool requested_xray_=false,shader_logged_=false;
+    double shader_retry_=0;
     bool owned(int32_t id)const{return id&&(id==tint_[0]||id==tint_[1]||id==tint_[2]);}
     void remove_material(Api& api,int32_t id){if(void* p=api.live(id))api.destroy(p,0);}
     int32_t clone_owned(Api& api,void* original){
@@ -200,28 +211,31 @@ class Controller {
         renderer.slots.clear();
     }
     void restore(Api& api,Actor& actor){for(auto& r:actor.renderers)restore(api,r);actor.renderers.clear();}
+    // Hidden/Internal-Colored declares _ZTest/_ZWrite/_Cull/_SrcBlend/_DstBlend as
+    // ordinary properties, so ZTest Always is honoured per material. UI/Default
+    // reads unity_GUIZTestMode instead and is only a fallback. FindBuiltin cannot
+    // be used: it only knows the builtin resource table and returned null for both.
+    bool acquire_xray_shader(Api& api){
+        if(shader_)return true;
+        shader_attempted_=true;
+        const char16_t* const names[]={u"Hidden/Internal-Colored",u"UI/Default"};
+        const int kinds[]={5,4};
+        for(int i=0;i<2&&!shader_;++i){
+            Span name{names[i],int32_t(std::char_traits<char16_t>::length(names[i]))};
+            shader_=api.returned_id(api.shader_by_name(&name));
+            if(shader_)shader_kind=kinds[i];
+        }
+        if(api.log&&!shader_logged_){
+            shader_logged_=true;char note[96];std::snprintf(note,sizeof(note),"Chams shader: kind=%d id=%d (5 Internal-Colored, 4 UI/Default, 0 none)",shader_kind,int(shader_));api.log(note);
+        }
+        return shader_!=0;
+    }
     bool prepare_tints(Api& api,int32_t source){
         if(tint_[0]&&tint_[1]&&tint_[2])return true;
         if(!shader_){
             shader_attempted_=true;
             if(requested_xray_){
-                // URP/Unlit hard-codes LEqual in this game, and UI/Default only
-                // reads unity_GUIZTestMode, which is not a declared material
-                // property. Hidden/Internal-Colored ships in the player's builtin
-                // resources and declares _ZTest/_ZWrite/_Cull/_SrcBlend/_DstBlend
-                // as ordinary properties, so ZTest Always is honoured per material.
-                // FindBuiltin only searches the player's builtin resource table
-                // ("unity default resources"). UI/Default lives in the main data file
-                // instead, so that lookup most likely returned null in r11 and no
-                // material was ever replaced.
-                auto colored=span(u"Hidden/Internal-Colored");shader_=api.returned_id(api.shader(&colored));
-                if(shader_)shader_kind=5;
-                else{
-                    auto ui=span(u"UI/Default");shader_=api.returned_id(api.shader(&ui));
-                    if(shader_)shader_kind=4;
-                }
-                if(api.log){char note[96];std::snprintf(note,sizeof(note),"Chams shader: Internal-Colored/UI-Default -> kind=%d id=%d",shader_kind,int(shader_));api.log(note);}
-                if(!shader_)return false;
+                if(!acquire_xray_shader(api))return false;
             }else{
             auto name=span(u"Universal Render Pipeline/Unlit");shader_=api.returned_id(api.shader(&name));
             if(shader_)shader_kind=1;
@@ -325,7 +339,7 @@ public:
         for(auto& actor:actors_)restore(api,actor);actors_.clear();
         for(int32_t id:tint_)remove_material(api,id);tint_={};
         for(auto& b:backups_)if(!b.adopted)remove_material(api,b.copy);backups_.clear();
-        shader_=0;shader_kind=0;shader_attempted_=false;alpha_=-1;renderer_count=0;status=0;last_tick_=-1;discovery_cursor_=0;
+        shader_=0;shader_kind=0;shader_attempted_=false;shader_logged_=false;shader_retry_=0;alpha_=-1;renderer_count=0;status=0;last_tick_=-1;discovery_cursor_=0;
     }
     bool due(double time)const{return time-last_tick_>=.1;}
     void update(Api& api,const Options& options,std::vector<Candidate>& candidates,double time){
@@ -333,6 +347,11 @@ public:
         if(!api.loaded){status=-1;return;}
         if(requested_xray_!=options.through_walls){reset(api);requested_xray_=options.through_walls;}
         if(time-last_tick_<.1)return;last_tick_=time;
+        // No usable shader: do not scan hierarchies for nothing; retry slowly.
+        if(requested_xray_&&!shader_){
+            if(time<shader_retry_){status=-2;return;}
+            if(!acquire_xray_shader(api)){shader_retry_=time+5;status=-2;return;}
+        }
         candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const Candidate& c){return !c.owner||!c.root||!std::isfinite(c.meters)||c.meters>options.range;}),candidates.end());
         std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b){return a.meters<b.meters;});
         if(candidates.size()>std::min(options.limit,32u))candidates.resize(std::min(options.limit,32u));

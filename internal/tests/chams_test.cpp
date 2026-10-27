@@ -36,7 +36,7 @@ void store(uintptr_t p,void* value){std::memcpy(reinterpret_cast<void*>(p),&valu
 mango_chams::Api api(){
     mango_chams::Api a;a.loaded=true;a.direct=true;a.decode=decode;a.find=find;a.read=read;a.store_ref=store;
     a.game_object=game;a.transform=transform;a.component=component;a.child_count=child_count;a.child=child;
-    a.clone=clone;a.materials=materials;a.set_materials=set_materials;a.shader=shader;a.property=property;a.set_flags=flags;a.destroy=destroy;
+    a.find_shader=shader;a.clone=clone;a.materials=materials;a.set_materials=set_materials;a.shader=shader;a.property=property;a.set_flags=flags;a.destroy=destroy;
     a.set_shader=[](void* p,void*){assert(static_cast<Object*>(p)->managed.id>1000);static_cast<Object*>(p)->unlit=true;};a.set_float=[](void* p,int id,float value){assert(static_cast<Object*>(p)->managed.id>1000);static_cast<Object*>(p)->floats[id]=value;};
     a.set_color=[](void* p,int,mango_chams::Color*){assert(static_cast<Object*>(p)->managed.id>1000);++colors;};
     a.get_shader=[](void*)->void*{return returned(30);};a.has_property=[](void* p,int){return static_cast<Object*>(p)->unlit||compatible_original;};

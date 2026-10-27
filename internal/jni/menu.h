@@ -258,6 +258,7 @@ template<class Settings> Result Draw(Settings& cfg,State& state,int w,int h,int 
                     toggle("No Recoil",cfg.no_recoil);toggle("No Spread",cfg.no_spread);
                     toggle("No Weapon Motion",cfg.no_weapon_motion);
                     toggle("Third Person",cfg.third_person);
+                    toggle("Solid Body (TP)",cfg.tp_solid);
                 }else{
                     Section("Misc",innerPad,s);
                     ImGui::PushItemWidth(colW-innerPad*2);

@@ -75,7 +75,7 @@ static void mango_log(const char* format,...){
 namespace mango {
 constexpr const char* package="com.catsbit.oxidesurvivalisland";
 // Identifies the loaded library in the startup log.
-const char revision_marker[]="MANGOCHEAT_REV=r12-colored-xray-world-camera";
+const char revision_marker[]="MANGOCHEAT_REV=r12b-findshader-diag";
 constexpr size_t max_players=256, bone_count=17;
 struct V2{float x=0,y=0;};
 struct V3{float x=0,y=0,z=0;};
@@ -99,6 +99,7 @@ struct Config{
     bool visibility_check=true,visible_only=false;
     bool chams=false;float chams_alpha=.6f,chams_range=80;int chams_limit=16;
     bool third_person=false;float camera_distance=2.5f;
+    bool tp_solid=false; // paint the local body with the chams material (shows whether the game hides it with its own shader)
 }cfg;
 std::atomic<bool> want_esp{true},want_skeleton{false},game_ready{false};
 std::atomic<float> esp_range{300};
@@ -108,7 +109,7 @@ std::atomic<float> chams_alpha{.6f},chams_range{80};
 std::atomic<int> chams_limit{16},chams_status{0};
 std::atomic<int> chams_shader{0};
 std::atomic<unsigned> chams_renderers{0},chams_creations{0},chams_restore_errors{0};
-std::atomic<bool> want_third_person{false};std::atomic<float> camera_distance{2.5f};
+std::atomic<bool> want_tp_solid{false};std::atomic<bool> want_third_person{false};std::atomic<float> camera_distance{2.5f};
 std::atomic<int> camera_status{0};std::atomic<unsigned> camera_meshes{0};
 std::atomic<uintptr_t> third_camera_transform{0};std::atomic<pid_t> unity_camera_thread{0};
 std::atomic<bool> want_no_recoil{false},want_no_spread{false},want_no_weapon_motion{false};
@@ -684,6 +685,7 @@ struct RawEngine {
 
 mango_chams::Api chams_api;
 mango_chams::Controller chams_controller;
+mango_chams::Controller tp_tint; // local body in third person, same materials as chams
 bool raw_type_named(Obj*,const char*);
 void* raw_named_reference(void* object,const char* name){
     Obj* value=reinterpret_cast<Obj*>(mango_unity::reference_field(reinterpret_cast<uintptr_t>(object),name,raw_read));
@@ -1093,6 +1095,7 @@ void raw_publish(int phase=0){
     raw_camera_seen.store(camera!=nullptr);
     if(!want_third_person.load()||!local||!camera){
         third_camera_transform.store(0);camera_controller.reset(camera_api);
+        tp_tint.reset(chams_api);
     }else if(phase>0){
         if(prepare_camera()){
             camera_collision.local=local;camera_collision.camera=camera;
@@ -1107,7 +1110,20 @@ void raw_publish(int phase=0){
                 raw_field<void*>(weapon,0x10),true,camera_distance.load(),frame,time,animator);
             third_camera_transform.store(camera_controller.native_transform());
             record_cost(camera_us_total,camera_us_max,camera_samples,camera_start);
-            if(const char* report=camera_controller.take_report())LOG("%s",report);
+            {
+                static std::vector<mango_chams::Candidate> own;own.clear();
+                if(want_tp_solid.load()&&camera_controller.status==1)
+                    own.push_back({reinterpret_cast<uintptr_t>(local),reinterpret_cast<uintptr_t>(native_local),1.f,0,reinterpret_cast<uintptr_t>(raw_field<void*>(animator,0x10))});
+                mango_chams::Options solid{!own.empty(),true,.9f,1000.f,1};
+                tp_tint.update(chams_api,solid,own,time);
+            }
+            if(const char* report=camera_controller.take_report()){
+                LOG("%s",report);
+                for(const char* line=camera_controller.detail();*line;){
+                    const char* end=std::strchr(line,'\n');const size_t length=end?size_t(end-line):std::strlen(line);
+                    LOG("%.*s",int(length),line);line+=length+(end?1:0);
+                }
+            }
         }else camera_controller.status=-1;
     }
     camera_status.store(camera_controller.status);camera_meshes.store(camera_controller.body_meshes);
@@ -1550,18 +1566,20 @@ void load_config(){
         if(std::fscanf(f,"%d %f",&third,&distance)==2){
             cfg.third_person=third!=0;
             if(std::isfinite(distance))cfg.camera_distance=std::clamp(distance,.8f,5.f);
+            int solid=0;
+            if(std::fscanf(f,"%d",&solid)==1)cfg.tp_solid=solid!=0;
         }
     }
     std::fclose(f);
 }
 void save_config(){
     std::array<char,512> text{};
-    std::snprintf(text.data(),text.size(),"MANGO_ESP_V1 %d %d %d %d %d %d %d %.1f %.3f %.3f %.3f %d %.0f %d %d %d %d %d %d %d %d %d %.3f %.1f %d %d %.2f\n",
+    std::snprintf(text.data(),text.size(),"MANGO_ESP_V1 %d %d %d %d %d %d %d %.1f %.3f %.3f %.3f %d %.0f %d %d %d %d %d %d %d %d %d %.3f %.1f %d %d %.2f %d\n",
         cfg.enabled,cfg.box,cfg.distances,cfg.lines,cfg.skeleton,cfg.fill,cfg.corners,
         cfg.range,cfg.color[0],cfg.color[1],cfg.color[2],cfg.magic_bullet,cfg.magic_fov,
         cfg.magic_ads_only,cfg.magic_team_filter,cfg.magic_point,
         cfg.no_recoil,cfg.no_spread,cfg.no_weapon_motion,cfg.visibility_check,cfg.visible_only,
-        cfg.chams,cfg.chams_alpha,cfg.chams_range,cfg.chams_limit,cfg.third_person,cfg.camera_distance);
+        cfg.chams,cfg.chams_alpha,cfg.chams_range,cfg.chams_limit,cfg.third_person,cfg.camera_distance,cfg.tp_solid);
     std::lock_guard<std::mutex> lock(config_queue_mutex);queued_config=text;config_queued=true;
 }
 void flush_config(){
@@ -1630,7 +1648,7 @@ void sync_config(){
     want_esp.store(cfg.enabled);want_skeleton.store(cfg.enabled&&cfg.skeleton);esp_range.store(cfg.range);
     want_visibility.store(cfg.visibility_check&&(cfg.enabled||cfg.chams));
     want_chams.store(cfg.chams);
-    want_third_person.store(cfg.third_person);camera_distance.store(cfg.camera_distance);
+    want_third_person.store(cfg.third_person);camera_distance.store(cfg.camera_distance);want_tp_solid.store(cfg.third_person&&cfg.tp_solid);
     chams_alpha.store(cfg.chams_alpha);chams_range.store(cfg.chams_range);chams_limit.store(cfg.chams_limit);
     want_magic_bullet.store(cfg.magic_bullet);magic_fov.store(cfg.magic_fov);
     want_magic_ads_only.store(cfg.magic_ads_only);want_magic_team_filter.store(cfg.magic_team_filter);

@@ -67,7 +67,7 @@ int main(){
     auto& camera_t=make(2);camera_t.position={10,2,30};camera_t.game=3;make(3).transform=2;
     auto& owner=make(10);owner.transform=11;
     auto& root=make(11);root.game=12;root.children={14};make(12).renderer=13;objects[12]->transform=11;
-    auto& body=make(13);body.game=12;body.enabled=false;body.shadows=2;objects[12]->layer=11;
+    auto& body=make(13);body.game=12;body.enabled=false;body.shadows=3;objects[12]->layer=11;
     auto& fp_t=make(14);fp_t.game=15;fp_t.parent=11;
     make(15).renderer=16;objects[15]->transform=14;objects[15]->layer=8;auto& arms=make(16);arms.game=15;
     auto& fp=make(20);fp.transform=14;
@@ -89,7 +89,7 @@ int main(){
     controller.update(api,find(1),&owner,&fp,nullptr,true,2.5f,3,1.03);
     assert(length(sub(camera_t.position,eye))<.301f);
     same(controller.undo_ray_origin(camera_t.position),eye);same(controller.undo_ray_origin(eye),eye);
-    assert(!body.enabled&&body.shadows==2&&!body.offscreen&&body.force_off&&arms.enabled&&camera.mask==mask);
+    assert(!body.enabled&&body.shadows==3&&!body.offscreen&&body.force_off&&arms.enabled&&camera.mask==mask);
     controller.reset(api);same(camera_t.position,eye);assert(controller.status==0);
     // Game-authored motion must survive reset. Rotation changes the orbit.
     limit=10;camera_t.rotation={0,1,0,0};
@@ -99,9 +99,9 @@ int main(){
     controller.reset(api);same(camera_t.position,{20,4,50});assert(camera.mask==4);
     // Destroyed renderer IDs may be recycled; never modify their replacement.
     controller.update(api,find(1),&owner,&fp,nullptr,true,2.5f,5,3.);
-    auto old=std::move(objects[13]);auto& replacement=make(13);replacement.enabled=true;replacement.shadows=2;
+    auto old=std::move(objects[13]);auto& replacement=make(13);replacement.enabled=true;replacement.shadows=3;
     controller.update(api,nullptr,nullptr,nullptr,nullptr,false,2.5f,6,3.1);
-    assert(replacement.enabled&&replacement.shadows==2&&!controller.shifted());
+    assert(replacement.enabled&&replacement.shadows==3&&!controller.shifted());
     controller.update(api,find(1),&owner,&fp,nullptr,true,NAN,7,4.);
     assert(!controller.shifted());
     // A hidden full-body model can be detached from the player root. Reveal
@@ -114,7 +114,7 @@ int main(){
     auto& animation=make(34);animation.enabled=false;
     auto& body_go=make(35);body_go.transform=36;body_go.active=false;body_go.renderer=37;
     auto& mesh_t=make(36);mesh_t.game=35;mesh_t.parent=32;
-    auto& mesh=make(37);mesh.game=35;mesh.enabled=false;mesh.shadows=2;
+    auto& mesh=make(37);mesh.game=35;mesh.enabled=false;mesh.shadows=3;
     controller.update(api,find(1),&owner,&fp,nullptr,true,2.5f,8,5.,find(30));
     assert(model_go.active&&body_go.active&&animator.enabled&&animation.enabled&&animator.culling==0);
     assert(mesh.enabled&&mesh.offscreen&&!mesh.force_off&&controller.body_meshes==1);
@@ -123,7 +123,7 @@ int main(){
     assert(animator.enabled&&animation.enabled&&animator.culling==0);
     controller.reset(api);
     assert(!model_go.active&&!body_go.active&&!animator.enabled&&!animation.enabled&&animator.culling==2);
-    assert(!mesh.enabled&&!mesh.offscreen&&mesh.force_off&&mesh.shadows==2);
+    assert(!mesh.enabled&&!mesh.offscreen&&mesh.force_off&&mesh.shadows==3);
     // If PlayerManager has not published its Animator yet, select the real
     // full-body Animator by PlayerModelInfo, not the first-person arms rig.
     model_go.animator=30;root.children.push_back(32);

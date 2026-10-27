@@ -39,3 +39,12 @@
 - Вероятная причина «чамсы не работают совсем»: `Shader.FindBuiltin` ищет только в таблице builtin-ресурсов
   (`unity default resources`), а `UI/Default` лежит в основном data-файле -> шейдер не находился, ни один материал не менялся.
   `Hidden/Internal-Colored` лежит именно в `unity default resources`.
+
+## r12b (по логу с устройства)
+- Лог показал: `FindBuiltin` не находит ни `Hidden/Internal-Colored`, ни `UI/Default` (`kind=0 id=0`, `status=-2`, `tint=...` отказов), поэтому чамсы не красили ничего.
+  Теперь шейдер ищется через `ResourcesAPIInternal.FindShaderByName` (это то, что вызывает `Shader.Find`), `FindBuiltin` — запасной.
+  Без шейдера иерархии больше не сканируются, повтор раз в 5 с, строка лога один раз.
+- Третье лицо по логу: камера уходит на 5 м, 6 body-рендереров enabled, forceOff=0, слой 0 в маске — но тело не видно.
+  Добавлена построчная диагностика рендереров: `visible` (engine culling), bounds, scale, mesh.
+  Исправлена проверка `ShadowCastingMode` (ShadowsOnly = 3, не 2).
+  Новый переключатель `Solid Body (TP)` (вкладка player): красит локальное тело материалом чамсов — если с ним тело видно, значит игра скрывает его своим шейдером/материалом.

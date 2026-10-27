@@ -32,6 +32,11 @@ struct Api {
     int(*culling)(void*)=nullptr;void(*set_culling)(void*,int)=nullptr;
     bool(*offscreen)(void*)=nullptr;void(*set_offscreen)(void*,bool)=nullptr;
     float(*collision)(void*,V3,V3,float)=nullptr;void* collision_context=nullptr;
+    // Optional, diagnostics only: why an enabled renderer is still not drawn.
+    bool(*is_visible)(void*)=nullptr;
+    void(*bounds)(void*,float*)=nullptr;   // center xyz, extents xyz
+    void(*lossy_scale)(void*,V3*)=nullptr;
+    void*(*shared_mesh)(void*)=nullptr;
     bool loaded=false;
     bool load(mango_chams::Api::Resolve resolve,mango_chams::Api& api){
         if(loaded)return true;objects=&api;
@@ -58,6 +63,10 @@ struct Api {
         TP_BIND(set_culling,"UnityEngine.Animator::set_cullingMode_Injected(System.IntPtr,UnityEngine.AnimatorCullingMode)");
         TP_BIND(offscreen,"UnityEngine.SkinnedMeshRenderer::get_updateWhenOffscreen_Injected(System.IntPtr)");
         TP_BIND(set_offscreen,"UnityEngine.SkinnedMeshRenderer::set_updateWhenOffscreen_Injected(System.IntPtr,System.Boolean)");
+        is_visible=reinterpret_cast<decltype(is_visible)>(resolve("UnityEngine.Renderer::get_isVisible_Injected(System.IntPtr)"));
+        bounds=reinterpret_cast<decltype(bounds)>(resolve("UnityEngine.Renderer::get_bounds_Injected(System.IntPtr,UnityEngine.Bounds&)"));
+        lossy_scale=reinterpret_cast<decltype(lossy_scale)>(resolve("UnityEngine.Transform::get_lossyScale_Injected(System.IntPtr,UnityEngine.Vector3&)"));
+        shared_mesh=reinterpret_cast<decltype(shared_mesh)>(resolve("UnityEngine.SkinnedMeshRenderer::get_sharedMesh_Injected(System.IntPtr)"));
 #undef TP_BIND
         loaded=objects->loaded;return loaded;
     }
@@ -155,7 +164,7 @@ class Controller {
     LocalModel model_;
     std::deque<int32_t> queue_;std::unordered_set<int32_t> visited_;
     bool fp_root_known_=false;
-    char report_[768]{};bool report_ready_=false;double next_report_=0;
+    char report_[768]{},detail_[1800]{};bool report_ready_=false;double next_report_=0;
     int32_t camera_=0,transform_=0;
     uintptr_t camera_native_=0,transform_native_=0,owner_=0,fp_=0,weapon_=0,animator_=0;
     uintptr_t supplied_animator_=0,fallback_animator_native_=0;int32_t fallback_animator_=0;
@@ -319,7 +328,7 @@ public:
             if(api.enabled(p)!=visible)api.set_enabled(p,visible);
             if(visible){
                 if(objects.force_off_offset>=0&&objects.field<uint8_t>(p,size_t(objects.force_off_offset)))objects.set_force_off(p,false);
-                if(api.shadows(p)==2)api.set_shadows(p,1);
+                if(api.shadows(p)==3)api.set_shadows(p,1); // ShadowCastingMode: 0 Off, 1 On, 2 TwoSided, 3 ShadowsOnly
                 if(it->skinned&&!api.offscreen(p))api.set_offscreen(p,true);
                 // The game may move the model between layers (hidden / shown);
                 // use the layer it has right now, not the one seen at discovery.
@@ -338,9 +347,9 @@ public:
         if(time>=next_report_){
             next_report_=time+2.;
             int used=std::snprintf(report_,sizeof(report_),
-                "TP travel=%.2f wanted=%.2f body_view=%d renderers=%zu body_meshes=%u primary=%zu fallback_animator=%d fp_root=%d mask=%08x->%08x |",
+                "TP travel=%.2f wanted=%.2f body_view=%d renderers=%zu body_meshes=%u primary=%zu fallback_animator=%d fp_root=%d mask=%08x->%08x head=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f) |",
                 travel,wanted,body_view,renderers_.size(),body_meshes,model_.primary().size(),fallback_animator_!=0,fp_root_known_,
-                uint32_t(original_mask_),uint32_t(applied_mask_));
+                uint32_t(original_mask_),uint32_t(applied_mask_),baseline_.x,baseline_.y,baseline_.z,applied_.x,applied_.y,applied_.z);
             unsigned shown=0;
             for(const auto& r:renderers_){
                 if(shown++>=8||used<0||size_t(used)>=sizeof(report_)-80)break;
@@ -350,10 +359,25 @@ public:
                 used+=std::snprintf(report_+used,sizeof(report_)-size_t(used)," [%d L%d %s en%d off%d sh%d]",
                     r.id,r.layer,r.fp?"fp":"body",enabled_now,hidden_now,enabled_now>=0?api.shadows(p):-1);
             }
+            // One line per renderer: is the engine culling it, where is it, how big, has it a mesh.
+            int d=0;detail_[0]=0;shown=0;
+            for(const auto& r:renderers_){
+                if(shown++>=8||d<0||size_t(d)>=sizeof(detail_)-200)break;
+                void* p=objects.live(r.id);
+                if(!p||reinterpret_cast<uintptr_t>(p)!=r.native)continue;
+                float b[6]{};V3 sc{};int vis=-1,mesh=-1;
+                if(api.is_visible)vis=api.is_visible(p)?1:0;
+                if(api.bounds)api.bounds(p,b);
+                if(api.lossy_scale){void* t=objects.native_return(api.game_transform(reinterpret_cast<void*>(r.go)));if(t)api.lossy_scale(t,&sc);}
+                if(r.skinned&&api.shared_mesh)mesh=api.shared_mesh(p)?1:0;
+                d+=std::snprintf(detail_+d,sizeof(detail_)-size_t(d),"TP renderer %d %s L%d visible=%d mesh=%d bounds=(%.1f,%.1f,%.1f)+-(%.2f,%.2f,%.2f) scale=(%.2f,%.2f,%.2f)\n",
+                    r.id,r.fp?"fp":"body",r.layer,vis,mesh,b[0],b[1],b[2],b[3],b[4],b[5],sc.x,sc.y,sc.z);
+            }
             report_ready_=true;
         }
     }
     // One diagnostic line every few seconds while the camera is active.
     const char* take_report(){if(!report_ready_)return nullptr;report_ready_=false;return report_;}
+    const char* detail()const{return detail_;}
 };
 } // namespace mango_camera
