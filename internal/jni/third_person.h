@@ -39,6 +39,10 @@ struct Api {
     void(*lossy_scale)(void*,V3*)=nullptr;
     void*(*shared_mesh)(void*)=nullptr;
     bool(*camera_occlusion)(void*)=nullptr;void(*set_camera_occlusion)(void*,bool)=nullptr;
+    // A game that sets Camera.cullingMatrix (floating-origin / first-person tricks) makes the
+    // engine cull with a frustum that does not follow our shifted camera.
+    void(*reset_culling)(void*)=nullptr;
+    void(*culling_matrix)(void*,float*)=nullptr,(*view_matrix)(void*,float*)=nullptr,(*projection_matrix)(void*,float*)=nullptr;
     bool loaded=false;
     bool load(mango_chams::Api::Resolve resolve,mango_chams::Api& api){
         if(loaded)return true;objects=&api;
@@ -71,6 +75,10 @@ struct Api {
         shared_mesh=reinterpret_cast<decltype(shared_mesh)>(resolve("UnityEngine.SkinnedMeshRenderer::get_sharedMesh_Injected(System.IntPtr)"));
         camera_occlusion=reinterpret_cast<decltype(camera_occlusion)>(resolve("UnityEngine.Camera::get_useOcclusionCulling_Injected(System.IntPtr)"));
         set_camera_occlusion=reinterpret_cast<decltype(set_camera_occlusion)>(resolve("UnityEngine.Camera::set_useOcclusionCulling_Injected(System.IntPtr,System.Boolean)"));
+        reset_culling=reinterpret_cast<decltype(reset_culling)>(resolve("UnityEngine.Camera::ResetCullingMatrix_Injected(System.IntPtr)"));
+        culling_matrix=reinterpret_cast<decltype(culling_matrix)>(resolve("UnityEngine.Camera::get_cullingMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
+        view_matrix=reinterpret_cast<decltype(view_matrix)>(resolve("UnityEngine.Camera::get_worldToCameraMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
+        projection_matrix=reinterpret_cast<decltype(projection_matrix)>(resolve("UnityEngine.Camera::get_nonJitteredProjectionMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
 #undef TP_BIND
         loaded=objects->loaded;return loaded;
     }
@@ -172,6 +180,7 @@ class Controller {
     std::deque<int32_t> queue_;std::unordered_set<int32_t> visited_;
     bool fp_root_known_=false,camera_occlusion_owned_=false,camera_occlusion_original_=true;
     double invisible_since_=-1;
+    float cull_diff_=-1;unsigned culling_resets_=0;
     char report_[768]{},detail_[1800]{};bool report_ready_=false;double next_report_=0;
     int32_t camera_=0,transform_=0;
     uintptr_t camera_native_=0,transform_native_=0,owner_=0,fp_=0,weapon_=0,animator_=0;
@@ -321,6 +330,17 @@ public:
         const float travel=std::clamp(allowed,0.f,wanted);
         baseline_=position;applied_=add(position,scale(direction,travel));
         api.set_position(transform,&applied_);shifted_=true;applied_frame_=frame;
+        // Measure, then drop any custom culling matrix: cull with the frustum of the pose we render from.
+        if(api.culling_matrix&&api.view_matrix&&api.projection_matrix&&time>=next_report_){
+            float c[16]{},v[16]{},pr[16]{};api.culling_matrix(camera,c);api.view_matrix(camera,v);api.projection_matrix(camera,pr);
+            float worst=0;
+            for(int col=0;col<4;++col)for(int row=0;row<4;++row){
+                float sum=0;for(int k=0;k<4;++k)sum+=pr[k*4+row]*v[col*4+k];
+                worst=std::max(worst,std::fabs(sum-c[col*4+row]));
+            }
+            cull_diff_=worst;
+        }
+        if(api.reset_culling){api.reset_culling(camera);++culling_resets_;}
         // Show the body whenever the camera has really left the head; a wall
         // directly behind the player keeps the first-person view.
         const bool body_view=travel>.5f;
@@ -374,9 +394,9 @@ public:
         if(time>=next_report_){
             next_report_=time+2.;
             int used=std::snprintf(report_,sizeof(report_),
-                "TP travel=%.2f wanted=%.2f body_view=%d renderers=%zu body_meshes=%u primary=%zu fallback_animator=%d fp_root=%d mask=%08x->%08x cam_occlusion_off=%d drawn=%u head=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f) |",
+                "TP travel=%.2f wanted=%.2f body_view=%d renderers=%zu body_meshes=%u primary=%zu fallback_animator=%d fp_root=%d mask=%08x->%08x cam_occlusion_off=%d drawn=%u cull_matrix_diff=%.4f head=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f) |",
                 travel,wanted,body_view,renderers_.size(),body_meshes,model_.primary().size(),fallback_animator_!=0,fp_root_known_,
-                uint32_t(original_mask_),uint32_t(applied_mask_),int(camera_occlusion_owned_),drawn,baseline_.x,baseline_.y,baseline_.z,applied_.x,applied_.y,applied_.z);
+                uint32_t(original_mask_),uint32_t(applied_mask_),int(camera_occlusion_owned_),drawn,cull_diff_,baseline_.x,baseline_.y,baseline_.z,applied_.x,applied_.y,applied_.z);
             unsigned shown=0;
             for(const auto& r:renderers_){
                 if(shown++>=8||used<0||size_t(used)>=sizeof(report_)-80)break;

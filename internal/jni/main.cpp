@@ -78,7 +78,7 @@ static void mango_log(const char* format,...){
 namespace mango {
 constexpr const char* package="com.catsbit.oxidesurvivalisland";
 // Identifies the loaded library in the startup log.
-const char revision_marker[]="MANGOCHEAT_REV=r12f-safe-guard-hooks";
+const char revision_marker[]="MANGOCHEAT_REV=r12g-cull-matrix";
 constexpr size_t max_players=256, bone_count=17;
 struct V2{float x=0,y=0;};
 struct V3{float x=0,y=0,z=0;};
