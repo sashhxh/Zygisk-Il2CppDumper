@@ -57,3 +57,11 @@
 ## r12d
 - Если после выключения occlusion у рендереров тела движок всё равно их не рисует (`isVisible=0` 1.5 с подряд),
   третье лицо выключает `Camera.useOcclusionCulling` на время работы и возвращает обратно. В логе: `cam_occlusion_off=1 drawn=N`.
+
+## r12e
+- Лог r12d: рендереры тела `enabled=1 forceOff=0 occlusion=0`, камера с выключенным occlusion, mesh есть, bounds на месте — и всё равно `isVisible=0`, `drawn=0`.
+  Occlusion не причина (запасной выключатель камеры отключён константой `kCameraOcclusionFallback`).
+- Наиболее вероятно, игра перепрятывает тело между нашим вызовом и культингом камеры (pre-cull / beginCameraRendering).
+  Добавлены хуки `Renderer.enabled/forceRenderingOff/shadowCastingMode/SetMaterialArray`, `GameObject.SetActive/layer`, `Camera.cullingMask`:
+  пока включено ТП, они пишут в лог `Guard: <вызов>(<значение>) BLOCKED/allowed callers=+0x…` (смещения в libil2cpp = игровой метод) и
+  блокируют скрытие (enabled=false, forceRenderingOff=true, SetActive(false), смена слоя) для рендереров/GameObject тела. Свои вызовы проходят без изменений.

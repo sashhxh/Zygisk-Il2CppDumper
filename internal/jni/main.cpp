@@ -75,7 +75,7 @@ static void mango_log(const char* format,...){
 namespace mango {
 constexpr const char* package="com.catsbit.oxidesurvivalisland";
 // Identifies the loaded library in the startup log.
-const char revision_marker[]="MANGOCHEAT_REV=r12d-tp-camera-occlusion";
+const char revision_marker[]="MANGOCHEAT_REV=r12e-tp-guard";
 constexpr size_t max_players=256, bone_count=17;
 struct V2{float x=0,y=0;};
 struct V3{float x=0,y=0,z=0;};
@@ -767,6 +767,100 @@ V3 camera_position_hook(Obj* self,const Method* method){
     }
     return original_camera_position?original_camera_position(self,method):V3{};
 }
+// ---- body guard ------------------------------------------------------------
+// The device log shows the local body enabled, positioned, not occluded and still
+// never drawn. Something re-hides it between our callback and the camera cull (a
+// pre-cull / beginCameraRendering handler of the game is the usual way). These
+// hooks log who touches the body renderers and GameObjects while third person is
+// on (with caller offsets in libil2cpp) and refuse the calls that would hide them.
+thread_local int own_calls=0; // our own Unity calls pass through untouched
+struct OwnScope {OwnScope(){++own_calls;}~OwnScope(){--own_calls;}};
+struct GuardSet {
+    std::array<uintptr_t,96> renderers{},objects{};size_t renderer_count=0,object_count=0;bool active=false;
+}guard_set;
+std::atomic<unsigned> guard_blocked{0};
+bool guard_contains(const std::array<uintptr_t,96>& list,size_t count,void* self){
+    const uintptr_t value=reinterpret_cast<uintptr_t>(self);
+    for(size_t i=0;i<count;++i)if(list[i]==value)return true;
+    return false;
+}
+bool guarded(void* self,bool object){
+    if(!guard_set.active||own_calls||!self||current_tid()!=unity_camera_thread.load())return false;
+    return object?guard_contains(guard_set.objects,guard_set.object_count,self):guard_contains(guard_set.renderers,guard_set.renderer_count,self);
+}
+void guard_note(const char* what,long value,bool blocked){
+    static std::array<unsigned,16> counts{};static std::array<double,16> last{};
+    static std::vector<const char*> names;
+    size_t slot=0;for(;slot<names.size();++slot)if(names[slot]==what)break;
+    if(slot==names.size()){if(names.size()>=counts.size())return;names.push_back(what);}
+    const double time=now();
+    if(counts[slot]>=12&&time-last[slot]<3)return;
+    ++counts[slot];last[slot]=time;
+    uintptr_t callers[4]{};
+    uintptr_t frame=reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+    callers[0]=reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+    for(int i=1;i<4;++i){
+        uintptr_t next=0,ret=0;
+        if(!frame||(frame&7)||!raw_read(frame,&next,sizeof(next))||!raw_read(frame+8,&ret,sizeof(ret)))break;
+        callers[i]=ret;frame=next;
+    }
+    LOG("Guard: %s(%ld) %s callers=+0x%lx +0x%lx +0x%lx +0x%lx",what,value,blocked?"BLOCKED":"allowed",
+        static_cast<unsigned long>(callers[0]-api.base),static_cast<unsigned long>(callers[1]-api.base),
+        static_cast<unsigned long>(callers[2]-api.base),static_cast<unsigned long>(callers[3]-api.base));
+}
+using RendererBoolFn=void(*)(void*,bool);using RendererIntFn=void(*)(void*,int);
+using ObjectBoolFn=void(*)(void*,bool);using ObjectIntFn=void(*)(void*,int);
+using MaterialsFn=void(*)(void*,void*,int);
+RendererBoolFn orig_renderer_enabled=nullptr,orig_force_off=nullptr;
+RendererIntFn orig_shadow_mode=nullptr;MaterialsFn orig_materials=nullptr;
+ObjectBoolFn orig_set_active=nullptr;ObjectIntFn orig_set_layer=nullptr,orig_camera_mask=nullptr;
+void hook_renderer_enabled(void* self,bool value){
+    if(guarded(self,false)){const bool block=!value;guard_note("Renderer.enabled",value,block);if(block){guard_blocked.fetch_add(1);return;}}
+    orig_renderer_enabled(self,value);
+}
+void hook_force_off(void* self,bool value){
+    if(guarded(self,false)){const bool block=value;guard_note("Renderer.forceRenderingOff",value,block);if(block){guard_blocked.fetch_add(1);return;}}
+    orig_force_off(self,value);
+}
+void hook_shadow_mode(void* self,int value){
+    if(guarded(self,false)){guard_note("Renderer.shadowCastingMode",value,false);}
+    orig_shadow_mode(self,value);
+}
+void hook_materials(void* self,void* array,int count){
+    if(guarded(self,false))guard_note("Renderer.SetMaterialArray",count,false);
+    orig_materials(self,array,count);
+}
+void hook_set_active(void* self,bool value){
+    if(guarded(self,true)){const bool block=!value;guard_note("GameObject.SetActive",value,block);if(block){guard_blocked.fetch_add(1);return;}}
+    orig_set_active(self,value);
+}
+void hook_set_layer(void* self,int value){
+    if(guarded(self,true)){guard_note("GameObject.layer",value,true);guard_blocked.fetch_add(1);return;}
+    orig_set_layer(self,value);
+}
+void hook_camera_mask(void* self,int value){
+    if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(self)==camera_controller.camera_native())guard_note("Camera.cullingMask",value,false);
+    orig_camera_mask(self,value);
+}
+void install_guard_hooks(mango_chams::Api::Resolve resolve){
+    static bool done=false;if(done)return;done=true;
+    struct Entry {const char* name;void* replacement;void** original;};
+    const Entry entries[]={
+        {"UnityEngine.Renderer::set_enabled_Injected(System.IntPtr,System.Boolean)",reinterpret_cast<void*>(hook_renderer_enabled),reinterpret_cast<void**>(&orig_renderer_enabled)},
+        {"UnityEngine.Renderer::set_forceRenderingOff_Injected(System.IntPtr,System.Boolean)",reinterpret_cast<void*>(hook_force_off),reinterpret_cast<void**>(&orig_force_off)},
+        {"UnityEngine.Renderer::set_shadowCastingMode_Injected(System.IntPtr,UnityEngine.Rendering.ShadowCastingMode)",reinterpret_cast<void*>(hook_shadow_mode),reinterpret_cast<void**>(&orig_shadow_mode)},
+        {"UnityEngine.Renderer::SetMaterialArray_Injected(System.IntPtr,UnityEngine.Material[],System.Int32)",reinterpret_cast<void*>(hook_materials),reinterpret_cast<void**>(&orig_materials)},
+        {"UnityEngine.GameObject::SetActive_Injected(System.IntPtr,System.Boolean)",reinterpret_cast<void*>(hook_set_active),reinterpret_cast<void**>(&orig_set_active)},
+        {"UnityEngine.GameObject::set_layer_Injected(System.IntPtr,System.Int32)",reinterpret_cast<void*>(hook_set_layer),reinterpret_cast<void**>(&orig_set_layer)},
+        {"UnityEngine.Camera::set_cullingMask_Injected(System.IntPtr,System.Int32)",reinterpret_cast<void*>(hook_camera_mask),reinterpret_cast<void**>(&orig_camera_mask)},
+    };
+    for(const auto& entry:entries){
+        void* target=resolve(entry.name);
+        if(!target){LOG("Guard: icall missing: %s",entry.name);continue;}
+        const int result=hook(target,entry.replacement,entry.original);
+        LOG("Guard: hook %s -> %d",entry.name,result);
+    }
+}
 bool prepare_camera(){
     if(!want_third_person.load())return camera_api.loaded;
     static bool logged_chams_api=false,logged_camera_api=false;
@@ -785,7 +879,9 @@ bool prepare_camera(){
         const int result=hook(reinterpret_cast<void*>(api.base+0xD4CFB20),reinterpret_cast<void*>(camera_position_hook),reinterpret_cast<void**>(&original_camera_position));
         if(result!=0){LOG("Third-person position hook failed: %d",result);return false;}
     }
-    unity_camera_thread.store(pid_t(current_tid()));return true;
+    unity_camera_thread.store(pid_t(current_tid()));
+    install_guard_hooks(resolve);
+    return true;
 }
 bool raw_type_named(Obj* object,const char* wanted){
     Obj* klass=raw_field<Obj*>(object,0);
@@ -1042,6 +1138,7 @@ void record_cost(std::atomic<uint64_t>& total,std::atomic<unsigned>& peak,std::a
 void raw_publish(int phase=0){
     static thread_local bool entered=false;if(entered)return;entered=true;
     struct Leave {bool& entered;~Leave(){entered=false;}} leave{entered};
+    OwnScope own_scope;
     static mango_esp::FrameGate frame_gate;
     const int frame=raw_fn<int(*)(const Method*)>(0xD4B577C)(nullptr);
     if(!frame_gate.accept(frame,phase))return;
@@ -1094,7 +1191,7 @@ void raw_publish(int phase=0){
     local_player.store(local);local_player_seen.store(local?time:0);
     raw_camera_seen.store(camera!=nullptr);
     if(!want_third_person.load()||!local||!camera){
-        third_camera_transform.store(0);camera_controller.reset(camera_api);
+        third_camera_transform.store(0);guard_set.active=false;camera_controller.reset(camera_api);
         tp_tint.reset(chams_api);
     }else if(phase>0){
         if(prepare_camera()){
@@ -1116,6 +1213,14 @@ void raw_publish(int phase=0){
                     own.push_back({reinterpret_cast<uintptr_t>(local),reinterpret_cast<uintptr_t>(native_local),1.f,0,reinterpret_cast<uintptr_t>(raw_field<void*>(animator,0x10))});
                 mango_chams::Options solid{!own.empty(),true,.9f,1000.f,1};
                 tp_tint.update(chams_api,solid,own,time);
+            }
+            {
+                guard_set.renderer_count=guard_set.object_count=0;
+                camera_controller.each_guarded(camera_api,[&](int kind,void* native){
+                    auto& list=kind==0?guard_set.renderers:guard_set.objects;auto& count=kind==0?guard_set.renderer_count:guard_set.object_count;
+                    if(native&&count<list.size())list[count++]=reinterpret_cast<uintptr_t>(native);
+                });
+                guard_set.active=camera_controller.status==1;
             }
             if(const char* report=camera_controller.take_report()){
                 LOG("%s",report);
@@ -1398,7 +1503,9 @@ void raw_hook_update(Obj* self,const Method* method){
         camera_controller.begin_frame(camera_api,raw_fn<int(*)(const Method*)>(0xD4B577C)(nullptr));
     }
     if(original_raw_update)original_raw_update(self,method);
-    if(self&&self==local_player.load()&&want_third_person.load()&&current_tid()==unity_camera_thread.load())camera_controller.before_animation(camera_api);
+    if(self&&self==local_player.load()&&want_third_person.load()&&current_tid()==unity_camera_thread.load()){
+        OwnScope own_scope;camera_controller.before_animation(camera_api);
+    }
     if(self&&!registry_healthy.load()){
         const auto native=raw_field<uintptr_t>(self,0x10);
         if(native){

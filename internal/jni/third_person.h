@@ -4,6 +4,7 @@
 #include <cstdio>
 
 namespace mango_camera {
+constexpr bool kCameraOcclusionFallback=false;
 struct V3 {float x=0,y=0,z=0;};
 struct Quaternion {float x=0,y=0,z=0,w=1;};
 inline V3 add(V3 a,V3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
@@ -153,6 +154,8 @@ public:
         show(api,visible);
     }
     void before_animation(Api& api){if(visible_)show(api,true);}
+    // Native GameObjects of the model targets (animator root, body, head).
+    template<class F>void each_object(Api& api,F f){for(auto r:targets_)if(void* go=live(api,r))f(go);}
     const auto& primary()const{return primary_;}
     bool has_primary()const{return !primary_.empty();}
 };
@@ -356,7 +359,8 @@ public:
         if(api.is_visible&&body_view&&body_meshes){
             if(drawn)invisible_since_=-1;
             else if(invisible_since_<0)invisible_since_=time;
-            else if(time-invisible_since_>1.5&&!camera_occlusion_owned_&&api.camera_occlusion&&api.set_camera_occlusion){
+            // Device log: the body stayed unseen with this off as well, so it is not the cause; kept disabled.
+            else if(kCameraOcclusionFallback&&time-invisible_since_>1.5&&!camera_occlusion_owned_&&api.camera_occlusion&&api.set_camera_occlusion){
                 camera_occlusion_original_=api.camera_occlusion(camera);
                 if(camera_occlusion_original_){api.set_camera_occlusion(camera,false);camera_occlusion_owned_=true;}
             }
@@ -402,5 +406,12 @@ public:
     // One diagnostic line every few seconds while the camera is active.
     const char* take_report(){if(!report_ready_)return nullptr;report_ready_=false;return report_;}
     const char* detail()const{return detail_;}
+    // Natives of what the game must not hide while the body is shown:
+    // renderers (kind 0) and GameObjects (kind 1).
+    template<class F>void each_guarded(Api& api,F f){
+        for(const auto& r:renderers_)if(!r.fp){f(0,reinterpret_cast<void*>(r.native));f(1,reinterpret_cast<void*>(r.go));}
+        model_.each_object(api,[&](void* go){f(1,go);});
+    }
+    uintptr_t camera_native()const{return camera_native_;}
 };
 } // namespace mango_camera
