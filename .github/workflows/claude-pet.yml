@@ -1,0 +1,39 @@
+name: Build Claude Pet APK
+
+on:
+  push:
+    branches:
+      - ccr-9a64d576-kmg0hk
+    paths:
+      - "claude-pet/**"
+      - ".github/workflows/claude-pet.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        working-directory: claude-pet
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-pet-debug-apk
+          path: claude-pet/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
