@@ -157,6 +157,7 @@ class Controller {
     struct Renderer {
         int32_t id=0;uintptr_t native=0;
         bool enabled=false,fp=false,skinned=false,offscreen=false,force_off=false;
+        bool occlusion=true,occlusion_owned=false;
         int shadows=0,layer=0;
         uintptr_t go=0; // a Renderer never changes GameObject; saves 3 calls per frame
     };
@@ -179,6 +180,7 @@ class Controller {
         if(api.enabled(p)==show)api.set_enabled(p,r.enabled);
         if(!r.fp&&api.shadows(p)==1)api.set_shadows(p,r.shadows);
         if(!r.fp&&r.skinned&&api.offscreen(p))api.set_offscreen(p,r.offscreen);
+        if(!r.fp&&r.occlusion_owned&&api.objects->occlusion&&!api.objects->occlusion(p))api.objects->set_occlusion(p,r.occlusion);
         if(!r.fp&&api.objects->force_off_offset>=0&&!api.objects->field<uint8_t>(p,size_t(api.objects->force_off_offset)))api.objects->set_force_off(p,r.force_off);
     }
     void add_renderer(Api& api,int32_t id,bool fp,bool skinned){
@@ -188,8 +190,8 @@ class Controller {
         void* go=o.native_return(o.game_object(native));if(!go)return;
         const int layer=api.layer(go);
         renderers_.push_back({id,reinterpret_cast<uintptr_t>(native),api.enabled(native),fp,skinned,skinned?api.offscreen(native):false,
-            o.force_off_offset>=0?o.field<uint8_t>(native,size_t(o.force_off_offset))!=0:false,api.shadows(native),layer,
-            reinterpret_cast<uintptr_t>(go)});
+            o.force_off_offset>=0?o.field<uint8_t>(native,size_t(o.force_off_offset))!=0:false,
+            o.occlusion?o.occlusion(native):true,false,api.shadows(native),layer,reinterpret_cast<uintptr_t>(go)});
     }
     void discover(Api& api,void* owner,void* fp,void* weapon,void* animator,double time){
         auto& objects=*api.objects;
@@ -330,6 +332,11 @@ public:
                 if(objects.force_off_offset>=0&&objects.field<uint8_t>(p,size_t(objects.force_off_offset)))objects.set_force_off(p,false);
                 if(api.shadows(p)==3)api.set_shadows(p,1); // ShadowCastingMode: 0 Off, 1 On, 2 TwoSided, 3 ShadowsOnly
                 if(it->skinned&&!api.offscreen(p))api.set_offscreen(p,true);
+                // The device log showed exactly the renderers with dynamic occlusion
+                // enabled (isVisible=0) being culled once the camera left the head, while
+                // the ones without it stayed visible: baked occlusion data hides the body
+                // from the shifted camera position.
+                if(objects.occlusion&&objects.set_occlusion&&objects.occlusion(p)){objects.set_occlusion(p,false);it->occlusion_owned=true;}
                 // The game may move the model between layers (hidden / shown);
                 // use the layer it has right now, not the one seen at discovery.
                 it->layer=api.layer(go);
@@ -370,8 +377,8 @@ public:
                 if(api.bounds)api.bounds(p,b);
                 if(api.lossy_scale){void* t=objects.native_return(api.game_transform(reinterpret_cast<void*>(r.go)));if(t)api.lossy_scale(t,&sc);}
                 if(r.skinned&&api.shared_mesh)mesh=api.shared_mesh(p)?1:0;
-                d+=std::snprintf(detail_+d,sizeof(detail_)-size_t(d),"TP renderer %d %s L%d visible=%d mesh=%d bounds=(%.1f,%.1f,%.1f)+-(%.2f,%.2f,%.2f) scale=(%.2f,%.2f,%.2f)\n",
-                    r.id,r.fp?"fp":"body",r.layer,vis,mesh,b[0],b[1],b[2],b[3],b[4],b[5],sc.x,sc.y,sc.z);
+                d+=std::snprintf(detail_+d,sizeof(detail_)-size_t(d),"TP renderer %d %s L%d visible=%d occlusion=%d mesh=%d bounds=(%.1f,%.1f,%.1f)+-(%.2f,%.2f,%.2f) scale=(%.2f,%.2f,%.2f)\n",
+                    r.id,r.fp?"fp":"body",r.layer,vis,objects.occlusion?int(objects.occlusion(p)):-1,mesh,b[0],b[1],b[2],b[3],b[4],b[5],sc.x,sc.y,sc.z);
             }
             report_ready_=true;
         }

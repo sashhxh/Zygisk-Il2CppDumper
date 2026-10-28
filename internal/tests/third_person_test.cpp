@@ -12,7 +12,7 @@ struct Object {
     Managed managed;int32_t transform=0,game=0,renderer=0,parent=0;
     std::vector<int32_t> children;
     V3 position{};Quaternion rotation{};
-    bool enabled=true,active=true,offscreen=false,force_off=true;int shadows=1,layer=0,mask=1,culling=2,model=0,animation=0,animator=0;
+    bool enabled=true,active=true,offscreen=false,force_off=true,occlusion=true;int shadows=1,layer=0,mask=1,culling=2,model=0,animation=0,animator=0;
     std::map<std::string,int> refs;
 };
 std::map<int32_t,std::unique_ptr<Object>> objects;
@@ -43,6 +43,7 @@ int main(){
     objects_api.child=[](void* p,int i){return returned(obj(p).children.at(i));};
     Object layout;objects_api.force_off_offset=int(reinterpret_cast<char*>(&layout.force_off)-reinterpret_cast<char*>(&layout));
     objects_api.set_force_off=[](void* p,bool value){obj(p).force_off=value;};
+    objects_api.occlusion=[](void* p){return obj(p).occlusion;};objects_api.set_occlusion=[](void* p,bool v){obj(p).occlusion=v;};
     objects_api.named_ref=[](void* managed,const char* name)->void*{auto& refs=obj(static_cast<Managed*>(managed)->native).refs;auto it=refs.find(name);return it==refs.end()?nullptr:find(it->second);};
     Api api;api.loaded=true;api.objects=&objects_api;api.collision=collision;
     api.position=[](void* p,V3* out){*out=obj(p).position;};api.set_position=[](void* p,V3* v){obj(p).position=*v;};
@@ -75,6 +76,7 @@ int main(){
     controller.update(api,find(1),&owner,&fp,nullptr,true,2.5f,1,1.);
     assert(controller.status==1&&controller.body_meshes==1&&controller.shifted());
     assert(body.enabled&&body.shadows==1&&body.offscreen&&!body.force_off&&!arms.enabled&&camera.mask==(1|(1<<11)));
+    assert(!body.occlusion); // baked occlusion culling must not hide the body from the shifted camera
     const V3 behind=camera_t.position;same(behind,{10.3f,2.15f,27.5f});
     same(controller.undo_ray_origin(behind),eye);same(controller.undo_ray_origin(eye),eye);
     // Repeated callback in one frame cannot accumulate the offset or rescan.
@@ -90,6 +92,7 @@ int main(){
     assert(length(sub(camera_t.position,eye))<.301f);
     same(controller.undo_ray_origin(camera_t.position),eye);same(controller.undo_ray_origin(eye),eye);
     assert(!body.enabled&&body.shadows==3&&!body.offscreen&&body.force_off&&arms.enabled&&camera.mask==mask);
+    assert(body.occlusion);
     controller.reset(api);same(camera_t.position,eye);assert(controller.status==0);
     // Game-authored motion must survive reset. Rotation changes the orbit.
     limit=10;camera_t.rotation={0,1,0,0};
