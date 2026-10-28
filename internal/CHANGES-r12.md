@@ -87,3 +87,9 @@
   такие рендереры рисует только first-person проход, обычные проходы их пропускают. Это объясняет тело, которое «включено, но не рисуется».
 - ТП теперь читает `Renderer.renderingLayerMask` рендереров тела и ставит default-слой (бит 0), возвращая исходное при выключении.
   В лог: `rlm=<сейчас>(was <исходный>)` и `Guard: Renderer.renderingLayerMask(...)` при вызовах игры.
+
+## r12i (диагностика)
+- Лог r12h: `rlm=1(was 1)` (слой уже дефолтный), `cull_matrix_diff=0` — ни rendering layer, ни culling matrix не объясняют `visible=0`. Тело enabled, на месте, не occluded, слой 0 в маске.
+- Теперь пишем: `TP camera near/far/fov`, `TP clip x y z w` — куда центр bounds тела попадает в frustum по culling-матрице (внутри: |x|,|y|<=w, 0<=z<=w),
+  `Chams: ... drawn_by_engine=N` — сколько рендереров чужих игроков движок реально рисует (контроль для `isVisible`),
+  и хуки `Camera.cullingMatrix=` / `Camera.ResetCullingMatrix` (вызовы игры при включённом ТП).

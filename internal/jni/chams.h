@@ -43,6 +43,7 @@ struct Api {
     void(*set_materials)(void*,void*,int)=nullptr;
     bool(*occlusion)(void*)=nullptr;void(*set_occlusion)(void*,bool)=nullptr;
     void(*set_force_off)(void*,bool)=nullptr;int force_off_offset=-1;
+    bool(*is_visible)(void*)=nullptr; // diagnostics: does the engine draw this renderer
     void*(*named_ref)(void*,const char*)=nullptr;
     // Host integration: decode an object return, resolve a managed instance ID,
     // safe memory read, and a managed reference store with the GC write barrier.
@@ -93,6 +94,7 @@ struct Api {
         CH_BIND(set_pass,"UnityEngine.Material::SetShaderPassEnabled_Injected(System.IntPtr,UnityEngine.Bindings.ManagedSpanWrapper&,System.Boolean)");
         CH_BIND(set_flags,"UnityEngine.Object::set_hideFlags_Injected(System.IntPtr,UnityEngine.HideFlags)");
         CH_BIND(destroy,"UnityEngine.Object::Destroy_Injected(System.IntPtr,System.Single)");
+        is_visible=reinterpret_cast<decltype(is_visible)>(resolve("UnityEngine.Renderer::get_isVisible_Injected(System.IntPtr)"));
         find_shader=reinterpret_cast<decltype(find_shader)>(resolve("UnityEngine.ResourcesAPIInternal::FindShaderByName_Injected(UnityEngine.Bindings.ManagedSpanWrapper&)"));
         if(!find_shader&&log)log("missing icall: ResourcesAPIInternal::FindShaderByName (falling back to FindBuiltin)");
         auto get_id_offset=reinterpret_cast<int(*)()>(resolve("UnityEngine.Object::GetOffsetOfInstanceIDInCPlusPlusObject()"));
@@ -333,7 +335,7 @@ class Controller {
 public:
     int status=0,shader_kind=0;unsigned renderer_count=0,material_creations=0,restore_errors=0;
     // Why nothing is painted: counted per failure reason, logged by the host.
-    struct Diag {unsigned actors=0,nodes=0,found=0,no_native=0,bad_slots=0,no_tint=0,no_backup=0,swaps=0,state_visible=0,state_occluded=0,state_unknown=0;} diag;
+    struct Diag {unsigned actors=0,nodes=0,found=0,no_native=0,bad_slots=0,no_tint=0,no_backup=0,swaps=0,drawn=0,state_visible=0,state_occluded=0,state_unknown=0;} diag;
     void reset(Api& api){
         if(!api.loaded)return;
         for(auto& actor:actors_)restore(api,actor);actors_.clear();
@@ -355,7 +357,7 @@ public:
         candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const Candidate& c){return !c.owner||!c.root||!std::isfinite(c.meters)||c.meters>options.range;}),candidates.end());
         std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b){return a.meters<b.meters;});
         if(candidates.size()>std::min(options.limit,32u))candidates.resize(std::min(options.limit,32u));
-        diag.state_visible=diag.state_occluded=diag.state_unknown=0;
+        diag.state_visible=diag.state_occluded=diag.state_unknown=0;diag.drawn=0;
         for(const auto& c:candidates)++(c.visibility==0?diag.state_visible:c.visibility==1?diag.state_occluded:diag.state_unknown);
         for(auto it=actors_.begin();it!=actors_.end();){
             if(std::none_of(candidates.begin(),candidates.end(),[&](const Candidate& c){return c.owner==it->owner&&c.root==it->root&&c.model==it->model;})){
@@ -395,6 +397,7 @@ public:
             for(auto r=actor.renderers.begin();r!=actor.renderers.end();){
                 void* native=api.live(r->id);if(!native||reinterpret_cast<uintptr_t>(native)!=r->native){for(auto slot:r->slots)release(api,slot,false);r=actor.renderers.erase(r);continue;}
                 ++renderer_count;const int state=std::clamp(c.visibility,0,2);
+                if(api.is_visible&&api.is_visible(native))++diag.drawn;
                 if((r->state!=state||time>=r->next_check)&&tint_[state]){
                     if(r->occlusion_owned&&api.occlusion(native))api.set_occlusion(native,false);
                     if(r->force_owned&&api.field<uint8_t>(native,size_t(api.force_off_offset)))api.set_force_off(native,false);

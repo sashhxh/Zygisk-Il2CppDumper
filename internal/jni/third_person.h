@@ -46,6 +46,7 @@ struct Api {
     // A game that sets Camera.cullingMatrix (floating-origin / first-person tricks) makes the
     // engine cull with a frustum that does not follow our shifted camera.
     uint32_t(*rendering_layer)(void*)=nullptr;void(*set_rendering_layer)(void*,uint32_t)=nullptr;
+    float(*near_clip)(void*)=nullptr,(*far_clip)(void*)=nullptr,(*field_of_view)(void*)=nullptr;
     void(*reset_culling)(void*)=nullptr;
     void(*culling_matrix)(void*,float*)=nullptr,(*view_matrix)(void*,float*)=nullptr,(*projection_matrix)(void*,float*)=nullptr;
     bool loaded=false;
@@ -86,6 +87,9 @@ struct Api {
         projection_matrix=reinterpret_cast<decltype(projection_matrix)>(resolve("UnityEngine.Camera::get_nonJitteredProjectionMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
         rendering_layer=reinterpret_cast<decltype(rendering_layer)>(resolve("UnityEngine.Renderer::get_renderingLayerMask_Injected(System.IntPtr)"));
         set_rendering_layer=reinterpret_cast<decltype(set_rendering_layer)>(resolve("UnityEngine.Renderer::set_renderingLayerMask_Injected(System.IntPtr,System.UInt32)"));
+        near_clip=reinterpret_cast<decltype(near_clip)>(resolve("UnityEngine.Camera::get_nearClipPlane_Injected(System.IntPtr)"));
+        far_clip=reinterpret_cast<decltype(far_clip)>(resolve("UnityEngine.Camera::get_farClipPlane_Injected(System.IntPtr)"));
+        field_of_view=reinterpret_cast<decltype(field_of_view)>(resolve("UnityEngine.Camera::get_fieldOfView_Injected(System.IntPtr)"));
 #undef TP_BIND
         loaded=objects->loaded;return loaded;
     }
@@ -421,6 +425,9 @@ public:
             }
             // One line per renderer: is the engine culling it, where is it, how big, has it a mesh.
             int d=0;detail_[0]=0;shown=0;
+            float cull[16]{};bool have_cull=false;
+            if(api.culling_matrix){api.culling_matrix(camera,cull);have_cull=true;}
+            d+=std::snprintf(detail_,sizeof(detail_),"TP camera near=%.3f far=%.1f fov=%.1f\n",api.near_clip?api.near_clip(camera):-1.f,api.far_clip?api.far_clip(camera):-1.f,api.field_of_view?api.field_of_view(camera):-1.f);
             for(const auto& r:renderers_){
                 if(shown++>=8||d<0||size_t(d)>=sizeof(detail_)-200)break;
                 void* p=objects.live(r.id);
@@ -430,6 +437,13 @@ public:
                 if(api.bounds)api.bounds(p,b);
                 if(api.lossy_scale){void* t=objects.native_return(api.game_transform(reinterpret_cast<void*>(r.go)));if(t)api.lossy_scale(t,&sc);}
                 if(r.skinned&&api.shared_mesh)mesh=api.shared_mesh(p)?1:0;
+                // Where the bounds centre lands in the culling frustum (inside: |x|,|y|<=w and 0<=z<=w).
+                float ndc[4]{0,0,0,0};
+                if(have_cull){
+                    const float x=b[0],y=b[1],z=b[2];
+                    for(int row=0;row<4;++row)ndc[row]=cull[0*4+row]*x+cull[1*4+row]*y+cull[2*4+row]*z+cull[3*4+row];
+                }
+                d+=std::snprintf(detail_+d,sizeof(detail_)-size_t(d),"TP clip x=%.2f y=%.2f z=%.2f w=%.2f\n",ndc[0],ndc[1],ndc[2],ndc[3]);
                 d+=std::snprintf(detail_+d,sizeof(detail_)-size_t(d),"TP renderer %d %s L%d visible=%d occlusion=%d rlm=%u(was %u) mesh=%d bounds=(%.1f,%.1f,%.1f)+-(%.2f,%.2f,%.2f) scale=(%.2f,%.2f,%.2f)\n",
                     r.id,r.fp?"fp":"body",r.layer,vis,objects.occlusion?int(objects.occlusion(p)):-1,api.rendering_layer?api.rendering_layer(p):0u,r.rlm_owned?r.rlm:(api.rendering_layer?api.rendering_layer(p):0u),mesh,b[0],b[1],b[2],b[3],b[4],b[5],sc.x,sc.y,sc.z);
             }

@@ -78,7 +78,7 @@ static void mango_log(const char* format,...){
 namespace mango {
 constexpr const char* package="com.catsbit.oxidesurvivalisland";
 // Identifies the loaded library in the startup log.
-const char revision_marker[]="MANGOCHEAT_REV=r12h-render-layer";
+const char revision_marker[]="MANGOCHEAT_REV=r12i-frustum-diag";
 constexpr size_t max_players=256, bone_count=17;
 struct V2{float x=0,y=0;};
 struct V3{float x=0,y=0,z=0;};
@@ -817,6 +817,8 @@ using MaterialsFn=void(*)(void*,void*,int);using RendererMaskFn=void(*)(void*,ui
 RendererBoolFn orig_renderer_enabled=nullptr,orig_force_off=nullptr;
 RendererIntFn orig_shadow_mode=nullptr;MaterialsFn orig_materials=nullptr;
 RendererMaskFn orig_rendering_layer=nullptr;
+using CameraMatrixFn=void(*)(void*,void*);using CameraFn=void(*)(void*);
+CameraMatrixFn orig_set_culling_matrix=nullptr;CameraFn orig_reset_culling_matrix=nullptr;
 ObjectBoolFn orig_set_active=nullptr;ObjectIntFn orig_set_layer=nullptr,orig_camera_mask=nullptr;
 void hook_renderer_enabled(void* self,bool value){
     if(guarded(self,false)){const bool block=!value;guard_note("Renderer.enabled",value,block);if(block){guard_blocked.fetch_add(1);return;}}
@@ -837,6 +839,14 @@ void hook_materials(void* self,void* array,int count){
 void hook_rendering_layer(void* self,uint32_t value){
     if(guarded(self,false))guard_note("Renderer.renderingLayerMask",long(value),false);
     orig_rendering_layer(self,value);
+}
+void hook_set_culling_matrix(void* self,void* matrix){
+    if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(self)==camera_controller.camera_native())guard_note("Camera.cullingMatrix=",0,false);
+    orig_set_culling_matrix(self,matrix);
+}
+void hook_reset_culling_matrix(void* self){
+    if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(self)==camera_controller.camera_native())guard_note("Camera.ResetCullingMatrix",0,false);
+    orig_reset_culling_matrix(self);
 }
 void hook_set_active(void* self,bool value){
     if(guarded(self,true)){const bool block=!value;guard_note("GameObject.SetActive",value,block);if(block){guard_blocked.fetch_add(1);return;}}
@@ -882,6 +892,8 @@ void install_guard_hooks(mango_chams::Api::Resolve resolve){
         {"UnityEngine.Renderer::set_shadowCastingMode_Injected(System.IntPtr,UnityEngine.Rendering.ShadowCastingMode)",reinterpret_cast<void*>(hook_shadow_mode),reinterpret_cast<void**>(&orig_shadow_mode)},
         {"UnityEngine.Renderer::SetMaterialArray_Injected(System.IntPtr,UnityEngine.Material[],System.Int32)",reinterpret_cast<void*>(hook_materials),reinterpret_cast<void**>(&orig_materials)},
         {"UnityEngine.Renderer::set_renderingLayerMask_Injected(System.IntPtr,System.UInt32)",reinterpret_cast<void*>(hook_rendering_layer),reinterpret_cast<void**>(&orig_rendering_layer)},
+        {"UnityEngine.Camera::set_cullingMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)",reinterpret_cast<void*>(hook_set_culling_matrix),reinterpret_cast<void**>(&orig_set_culling_matrix)},
+        {"UnityEngine.Camera::ResetCullingMatrix_Injected(System.IntPtr)",reinterpret_cast<void*>(hook_reset_culling_matrix),reinterpret_cast<void**>(&orig_reset_culling_matrix)},
         {"UnityEngine.GameObject::SetActive_Injected(System.IntPtr,System.Boolean)",reinterpret_cast<void*>(hook_set_active),reinterpret_cast<void**>(&orig_set_active)},
         {"UnityEngine.GameObject::set_layer_Injected(System.IntPtr,System.Int32)",reinterpret_cast<void*>(hook_set_layer),reinterpret_cast<void**>(&orig_set_layer)},
         {"UnityEngine.Camera::set_cullingMask_Injected(System.IntPtr,System.Int32)",reinterpret_cast<void*>(hook_camera_mask),reinterpret_cast<void**>(&orig_camera_mask)},
@@ -1378,9 +1390,9 @@ void raw_publish(int phase=0){
             static double last_chams_log=0;
             if(time-last_chams_log>=2){
                 last_chams_log=time;const auto& d=chams_controller.diag;
-                LOG("Chams: status=%d shader_kind=%d candidates=%zu actors=%u renderers=%u scanned_nodes=%u found=%u fail[no_native=%u slots=%u tint=%u backup=%u] swaps=%u states[visible=%u occluded=%u unknown=%u] materials=%u id_failures=%u restore_errors=%u",
+                LOG("Chams: status=%d shader_kind=%d candidates=%zu actors=%u renderers=%u scanned_nodes=%u found=%u fail[no_native=%u slots=%u tint=%u backup=%u] swaps=%u drawn_by_engine=%u states[visible=%u occluded=%u unknown=%u] materials=%u id_failures=%u restore_errors=%u",
                     chams_controller.status,chams_controller.shader_kind,candidates.size(),d.actors,chams_controller.renderer_count,d.nodes,d.found,
-                    d.no_native,d.bad_slots,d.no_tint,d.no_backup,d.swaps,d.state_visible,d.state_occluded,d.state_unknown,
+                    d.no_native,d.bad_slots,d.no_tint,d.no_backup,d.swaps,d.drawn,d.state_visible,d.state_occluded,d.state_unknown,
                     chams_controller.material_creations,chams_api.id_failures,chams_controller.restore_errors);
             }
         }
