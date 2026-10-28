@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
+#include <csignal>
+#include <ucontext.h>
 #include <exception>
 #include <mutex>
 #include <thread>
@@ -55,9 +57,10 @@ extern "C" void mango_file_log(const char* tag,const char* line){
     std::lock_guard<std::mutex> lock(file_log_mutex);
     const double t=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if(t>=file_log_retry&&(!file_log_handles[0]||!file_log_handles[1])){
-        file_log_retry=t+5;char a[256],b[256];file_log_paths(a,b);
-        if(!file_log_handles[0])file_log_handles[0]=std::fopen(a,"w");
-        if(!file_log_handles[1])file_log_handles[1]=std::fopen(b,"w");
+        file_log_retry=t+5;char a[256],b[256],old[272];file_log_paths(a,b);
+        // The previous run's log (it may hold the crash) is kept as *.prev.
+        if(!file_log_handles[0]){std::snprintf(old,sizeof(old),"%s.prev",a);std::rename(a,old);file_log_handles[0]=std::fopen(a,"w");}
+        if(!file_log_handles[1]){std::snprintf(old,sizeof(old),"%s.prev",b);std::rename(b,old);file_log_handles[1]=std::fopen(b,"w");}
     }
     for(int i=0;i<2;++i){
         FILE* f=file_log_handles[i];
@@ -75,7 +78,7 @@ static void mango_log(const char* format,...){
 namespace mango {
 constexpr const char* package="com.catsbit.oxidesurvivalisland";
 // Identifies the loaded library in the startup log.
-const char revision_marker[]="MANGOCHEAT_REV=r12e-tp-guard";
+const char revision_marker[]="MANGOCHEAT_REV=r12f-safe-guard-hooks";
 constexpr size_t max_players=256, bone_count=17;
 struct V2{float x=0,y=0;};
 struct V3{float x=0,y=0,z=0;};
@@ -842,6 +845,29 @@ void hook_camera_mask(void* self,int value){
     if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(self)==camera_controller.camera_native())guard_note("Camera.cullingMask",value,false);
     orig_camera_mask(self,value);
 }
+// The icall entry points are tiny stubs ("tst w1,#0xff; cset w1,ne; b impl", or a lone
+// "b impl"). Dobby overwrites 16 bytes at the target, which clobbered the neighbouring
+// icalls and crashed the game the moment third person turned on. Follow the stub to the
+// real implementation and refuse any target that does not have four plain instructions.
+void* hook_target(void* function){
+    uintptr_t address=reinterpret_cast<uintptr_t>(function);
+    uint32_t code[6]{};
+    for(int hop=0;hop<4;++hop){
+        if(!raw_read(address,code,sizeof(code)))return nullptr;
+        size_t index=(code[0]==0x72001c3f&&code[1]==0x1a9f07e1)?2:0;
+        if((code[index]&0xfc000000)==0x14000000){
+            int64_t offset=int64_t(code[index]&0x03ffffff);if(offset&(1<<25))offset-=int64_t(1)<<26;
+            address=address+index*4+size_t(offset*4);continue;
+        }
+        break;
+    }
+    if(!raw_read(address,code,sizeof(code)))return nullptr;
+    for(int k=0;k<4;++k){
+        const uint32_t x=code[k];
+        if((x&0xfc000000)==0x14000000||x==0xd65f03c0||(x&0xfffffc1f)==0xd61f0000||(x&0xff000010)==0x54000000)return nullptr;
+    }
+    return reinterpret_cast<void*>(address);
+}
 void install_guard_hooks(mango_chams::Api::Resolve resolve){
     static bool done=false;if(done)return;done=true;
     struct Entry {const char* name;void* replacement;void** original;};
@@ -855,10 +881,13 @@ void install_guard_hooks(mango_chams::Api::Resolve resolve){
         {"UnityEngine.Camera::set_cullingMask_Injected(System.IntPtr,System.Int32)",reinterpret_cast<void*>(hook_camera_mask),reinterpret_cast<void**>(&orig_camera_mask)},
     };
     for(const auto& entry:entries){
-        void* target=resolve(entry.name);
-        if(!target){LOG("Guard: icall missing: %s",entry.name);continue;}
+        void* icall=resolve(entry.name);
+        if(!icall){LOG("Guard: icall missing: %s",entry.name);continue;}
+        void* target=hook_target(icall);
+        if(!target){LOG("Guard: skipped %s (implementation too short to hook safely)",entry.name);continue;}
         const int result=hook(target,entry.replacement,entry.original);
-        LOG("Guard: hook %s -> %d",entry.name,result);
+        LOG("Guard: hook %s -> %d (stub=+0x%lx impl=+0x%lx)",entry.name,result,
+            static_cast<unsigned long>(reinterpret_cast<uintptr_t>(icall)&0xffffff),static_cast<unsigned long>(reinterpret_cast<uintptr_t>(target)&0xffffff));
     }
 }
 bool prepare_camera(){
@@ -1838,11 +1867,51 @@ void install_render_hooks(){
         int r=hook(target,entry.replacement,entry.original);if(r==0){installed.push_back(target);LOG("Render hook: %s",entry.name);}
     }
 }
+// Writes the faulting address and a frame-pointer backtrace to the log file before the
+// game's own crash reporter (or the default action) takes over.
+struct sigaction crash_old[8];int crash_signals[]={SIGSEGV,SIGBUS,SIGILL,SIGABRT,SIGFPE,SIGTRAP};
+void crash_write(const char* text){
+    const size_t length=std::strlen(text);
+    for(FILE* f:file_log_handles)if(f)(void)!write(fileno(f),text,length);
+}
+void crash_handler(int signal_number,siginfo_t* info,void* context){
+    char line[640];
+    auto* uc=static_cast<ucontext_t*>(context);
+    const uintptr_t pc=uc?uintptr_t(uc->uc_mcontext.pc):0,lr=uc?uintptr_t(uc->uc_mcontext.regs[30]):0,sp=uc?uintptr_t(uc->uc_mcontext.sp):0;
+    std::snprintf(line,sizeof(line),"CRASH signal=%d code=%d fault=%p pc=0x%lx (il2cpp+0x%lx) lr=0x%lx (il2cpp+0x%lx) sp=0x%lx\n",
+        signal_number,info?info->si_code:0,info?info->si_addr:nullptr,static_cast<unsigned long>(pc),static_cast<unsigned long>(pc-api.base),
+        static_cast<unsigned long>(lr),static_cast<unsigned long>(lr-api.base),static_cast<unsigned long>(sp));
+    crash_write(line);
+    uintptr_t frame=uc?uintptr_t(uc->uc_mcontext.regs[29]):0;
+    for(int i=0;i<10&&frame&&!(frame&7);++i){
+        uintptr_t next=0,ret=0;
+        if(!raw_read(frame,&next,sizeof(next))||!raw_read(frame+8,&ret,sizeof(ret)))break;
+        std::snprintf(line,sizeof(line),"CRASH frame %d ret=0x%lx (il2cpp+0x%lx)\n",i,static_cast<unsigned long>(ret),static_cast<unsigned long>(ret-api.base));
+        crash_write(line);
+        if(next<=frame)break;frame=next;
+    }
+    for(size_t i=0;i<sizeof(crash_signals)/sizeof(crash_signals[0]);++i){
+        if(crash_signals[i]!=signal_number)continue;
+        const struct sigaction& old=crash_old[i];
+        if(old.sa_flags&SA_SIGINFO&&old.sa_sigaction){old.sa_sigaction(signal_number,info,context);return;}
+        if(!(old.sa_flags&SA_SIGINFO)&&old.sa_handler&&old.sa_handler!=SIG_DFL&&old.sa_handler!=SIG_IGN){old.sa_handler(signal_number);return;}
+    }
+    signal(signal_number,SIG_DFL);raise(signal_number);
+}
+void install_crash_handler(){
+    static bool done=false;if(done)return;done=true;
+    for(size_t i=0;i<sizeof(crash_signals)/sizeof(crash_signals[0]);++i){
+        struct sigaction action{};action.sa_sigaction=crash_handler;action.sa_flags=SA_SIGINFO|SA_ONSTACK;sigemptyset(&action.sa_mask);
+        sigaction(crash_signals[i],&action,&crash_old[i]);
+    }
+    LOG("Crash handler installed");
+}
 void boot(){
     char cmd[256]{};FILE* f=std::fopen("/proc/self/cmdline","r");if(f){std::fread(cmd,1,sizeof(cmd)-1,f);std::fclose(f);}
     if(std::strcmp(cmd,package)){LOG("Wrong process: %s",cmd);return;}
     load_config();sync_config();
     LOG("boot: pid=%d uid=%u revision=%s",int(getpid()),unsigned(getuid()),revision_marker);
+    install_crash_handler();
     raw_observations.reserve(max_players);
     LOG("MANGOcheat ESP %s build %s %s package=%s",revision_marker,__DATE__,__TIME__,package);void* attached=nullptr;
     for(unsigned attempts=0;;++attempts){

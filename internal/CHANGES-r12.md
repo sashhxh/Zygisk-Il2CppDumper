@@ -65,3 +65,10 @@
   Добавлены хуки `Renderer.enabled/forceRenderingOff/shadowCastingMode/SetMaterialArray`, `GameObject.SetActive/layer`, `Camera.cullingMask`:
   пока включено ТП, они пишут в лог `Guard: <вызов>(<значение>) BLOCKED/allowed callers=+0x…` (смещения в libil2cpp = игровой метод) и
   блокируют скрытие (enabled=false, forceRenderingOff=true, SetActive(false), смена слоя) для рендереров/GameObject тела. Свои вызовы проходят без изменений.
+
+## r12f
+- Краш при включении ТП (лог r12e: хуки встали, один TP-отчёт, дальше тишина). Причина: icall-входы в `libunity` — крошечные заглушки
+  (`tst w1,#0xff; cset w1,ne; b impl` или одно `b impl`, 4–12 байт), а Dobby пишет 16 байт и затирал соседние icall'ы.
+  Теперь хук ставится на реальную реализацию (за заглушкой) и только если там есть 4 обычные инструкции; иначе `Guard: skipped …`.
+- Обработчик краша: `CRASH signal=… fault=… pc=… (il2cpp+0x…)` и бэктрейс по frame pointer пишутся в лог до передачи управления игре.
+- Предыдущий лог сохраняется как `mango_log.txt.prev` (раньше новый запуск затирал лог с крашем).
