@@ -62,11 +62,7 @@ void log(const char* format, ...) {
     va_start(args, format);
 #if defined(__ANDROID__)
     {
-        char line[512];
-        va_list copy;
-        va_copy(copy, args);
-        std::vsnprintf(line, sizeof(line), format, copy);
-        va_end(copy);
+        char line[512];va_list copy;va_copy(copy, args);std::vsnprintf(line, sizeof(line), format, copy);va_end(copy);
         mango_file_log("OxideBypass", line);
     }
     __android_log_vprint(ANDROID_LOG_INFO, "OxideBypass", format, args);

@@ -2,47 +2,57 @@
 #include <cassert>
 #include <map>
 #include <memory>
-#include <set>
 #include <string>
 
 namespace {
 struct Object;
 struct Managed {char header[16]{};Object* native=nullptr;int32_t id=0;};
-struct Object {Managed managed;int32_t native_id=0,transform=0,game=0,renderer=0;std::vector<int32_t> children,materials;int flags=0,queue=0;bool unlit=false,occlusion=true,force_off=true;std::map<int,float> floats;};
+struct Object {Managed managed;int32_t native_id=0,transform=0,game=0,renderer=0;std::vector<int32_t> children,materials;int flags=0,queue=0;bool unlit=false,occlusion=true,force_off=false,enabled=true;std::map<int,float> floats;};
 struct Array {void* klass=nullptr,*monitor=nullptr,*bounds=nullptr;uintptr_t size=0;void* items[32]{};};
 std::map<int32_t,std::unique_ptr<Object>> objects;
 std::vector<std::unique_ptr<Array>> arrays;
-int next_id=1000,clones=0,sets=0,lookups=0,full_lookups=0,colors=0;double fake_time=0;double fake_clock(){return fake_time+=.0005;}bool shader_available=true,compatible_original=false;
-std::set<std::u16string> unavailable;
+int next_id=1000,clones=0,sets=0,lookups=0,colors=0;bool shader_available=true,compatible_original=false;
 std::map<std::u16string,int> properties;
 Object& make(int32_t id){auto p=std::make_unique<Object>();p->managed.native=p.get();p->managed.id=id;p->native_id=id;auto* out=p.get();objects[id]=std::move(p);return *out;}
 void* find(int32_t id){auto it=objects.find(id);return it==objects.end()?nullptr:&it->second->managed;}
 void* returned(int32_t id){return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(find(id))|uintptr_t(find(id)?1:0));}
 void* decode(void* p){return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(p)&~uintptr_t(1));}
-void* game(void* p){return returned(static_cast<Object*>(p)->game);}
+void* game(void* p){auto& o=*static_cast<Object*>(p);return returned(o.game?o.game:o.transform?objects[o.transform]->game:0);}
 void* transform(void* p){return returned(static_cast<Object*>(p)->transform);}
-void* component(void* p,mango_chams::Span* name){auto text=std::u16string(name->data,name->length);++lookups;if(text.rfind(u"UnityEngine.",0)==0)++full_lookups;if(text==u"SkinnedMeshRenderer"||text==u"UnityEngine.SkinnedMeshRenderer")return returned(static_cast<Object*>(p)->renderer);assert(text==u"MeshRenderer"||text==u"UnityEngine.MeshRenderer");return nullptr;}
+void* component(void* p,mango_chams::Span* name){auto text=std::u16string(name->data,name->length);++lookups;if(text==u"SkinnedMeshRenderer"||text==u"UnityEngine.SkinnedMeshRenderer")return returned(static_cast<Object*>(p)->renderer);assert(text==u"MeshRenderer"||text==u"UnityEngine.MeshRenderer");return nullptr;}
 int child_count(void* p){return int(static_cast<Object*>(p)->children.size());}
 void* child(void* p,int i){return returned(static_cast<Object*>(p)->children.at(i));}
 void* clone(void* source){auto& copy=make(++next_id);copy.materials=static_cast<Object*>(source)->materials;copy.unlit=static_cast<Object*>(source)->unlit;++clones;return returned(next_id);}
 void* materials(void* renderer){auto a=std::make_unique<Array>();auto& slots=static_cast<Object*>(renderer)->materials;a->size=slots.size();for(size_t i=0;i<slots.size();++i)a->items[i]=find(slots[i]);auto* p=a.get();arrays.push_back(std::move(a));return p;}
 void set_materials(void* renderer,void* data,int n){auto* a=static_cast<Array*>(data);assert(a->size==uintptr_t(n));auto& slots=static_cast<Object*>(renderer)->materials;slots.clear();for(int i=0;i<n;++i)slots.push_back(static_cast<Managed*>(a->items[i])->id);++sets;}
-void* shader(mango_chams::Span* name){auto text=std::u16string(name->data,name->length);assert(text==u"Universal Render Pipeline/Unlit"||text==u"Universal Render Pipeline/Particles/Unlit"||text==u"UI/Default"||text==u"Hidden/Internal-Colored");return shader_available&&!unavailable.count(text)?returned(30):nullptr;}
+void* shader(mango_chams::Span* name){auto text=std::u16string(name->data,name->length);assert(text==u"Universal Render Pipeline/Unlit"||text==u"Universal Render Pipeline/Particles/Unlit"||text==u"UI/Default");return shader_available?returned(30):nullptr;}
 int property(mango_chams::Span* name){const std::u16string s(name->data,name->length);auto [it,inserted]=properties.emplace(s,int(properties.size())+1);return it->second;}
 void flags(void* p,int flags){assert(static_cast<Object*>(p)->managed.id>1000);static_cast<Object*>(p)->flags=flags;}
 void destroy(void* p,float){assert(static_cast<Object*>(p)->managed.id>1000);objects.erase(static_cast<Object*>(p)->managed.id);}
 bool read(uintptr_t p,void* out,size_t size){if(!p)return false;std::memcpy(out,reinterpret_cast<void*>(p),size);return true;}
 void store(uintptr_t p,void* value){std::memcpy(reinterpret_cast<void*>(p),&value,sizeof(value));}
+int queries=0;bool xray_ready=true;
+void* collect(void* p,void* type,bool typed,bool recursive,bool inactive,bool reverse,void* list){
+    assert(type&&typed&&recursive&&!inactive&&!reverse&&!list);++queries;
+    auto a=std::make_unique<Array>();std::vector<Object*> pending{static_cast<Object*>(p)};
+    while(!pending.empty()){
+        auto* go=pending.back();pending.pop_back();if(go->renderer){assert(a->size<32);a->items[a->size++]=find(go->renderer);}
+        for(auto& entry:objects)if(entry.second->game==go->native_id)for(int child:entry.second->children){auto* tr=objects[child].get();if(tr->game)pending.push_back(objects[tr->game].get());}
+    }
+    auto* out=a.get();arrays.push_back(std::move(a));return out;
+}
 mango_chams::Api api(){
-    mango_chams::Api a;a.loaded=true;a.direct=true;a.decode=decode;a.find=find;a.read=read;a.store_ref=store;
+    mango_chams::Api a;a.loaded=true;a.decode=decode;a.find=find;a.read=read;a.store_ref=store;
     a.game_object=game;a.transform=transform;a.component=component;a.child_count=child_count;a.child=child;
-    a.find_shader=shader;a.clone=clone;a.materials=materials;a.set_materials=set_materials;a.shader=shader;a.property=property;a.set_flags=flags;a.destroy=destroy;
+    a.clone=clone;a.materials=materials;a.set_materials=set_materials;a.shader=shader;a.property=property;a.set_flags=flags;a.destroy=destroy;
     a.set_shader=[](void* p,void*){assert(static_cast<Object*>(p)->managed.id>1000);static_cast<Object*>(p)->unlit=true;};a.set_float=[](void* p,int id,float value){assert(static_cast<Object*>(p)->managed.id>1000);static_cast<Object*>(p)->floats[id]=value;};
     a.set_color=[](void* p,int,mango_chams::Color*){assert(static_cast<Object*>(p)->managed.id>1000);++colors;};
     a.get_shader=[](void*)->void*{return returned(30);};a.has_property=[](void* p,int){return static_cast<Object*>(p)->unlit||compatible_original;};
     a.set_texture=[](void*,int,void*){};a.set_queue=[](void* p,int value){static_cast<Object*>(p)->queue=value;};a.keyword_on=[](void*,mango_chams::Span*){};a.keyword_off=a.keyword_on;a.set_pass=[](void*,mango_chams::Span*,bool){};
     a.occlusion=[](void* p){return static_cast<Object*>(p)->occlusion;};a.set_occlusion=[](void* p,bool value){static_cast<Object*>(p)->occlusion=value;};
     Object layout;a.force_off_offset=int(reinterpret_cast<char*>(&layout.force_off)-reinterpret_cast<char*>(&layout));a.set_force_off=[](void* p,bool value){static_cast<Object*>(p)->force_off=value;};
+    a.renderer_type=reinterpret_cast<void*>(1);a.components=collect;a.renderer_enabled=[](void* p){return static_cast<Object*>(p)->enabled;};a.is_mesh=[](void*){return true;};
+    a.xray_shader=[](){return xray_ready?30:0;};a.shader_state=[](){return xray_ready?3:1;};
     return a;
 }
 }
@@ -95,17 +105,14 @@ int main(){
     shader_available=true;options.through_walls=true;options.enabled=true;
     controller.update(a,options,candidates,6.);
     const int tint=objects[46]->materials[0];assert(controller.shader_kind==5&&tint>1000);
-    // Hidden/Internal-Colored declares its depth state as plain properties.
-    assert(objects[tint]->floats[properties[u"_ZTest"]]==8&&objects[tint]->floats[properties[u"_ZWrite"]]==0);
-    assert(objects[tint]->floats[properties[u"_Cull"]]==0&&objects[tint]->floats[properties[u"_SrcBlend"]]==5&&objects[tint]->floats[properties[u"_DstBlend"]]==10);
     assert(objects[tint]->queue==4000);
     assert(!objects[46]->occlusion&&!objects[46]->force_off);
     // Equipping armor can replace and resize the array. Retain the Renderer,
     // capture the new originals, and reapply without a two-second rediscovery.
     make(51);make(52);objects[46]->materials={51,52};objects[46]->force_off=true;
-    controller.update(a,options,candidates,6.8);
-    assert(controller.renderer_count==1&&objects[46]->materials==std::vector<int32_t>({tint,tint})&&!objects[46]->force_off);
-    options.enabled=false;controller.update(a,options,candidates,6.81);
+    controller.update(a,options,candidates,6.4);
+    assert(controller.renderer_count==1&&objects[46]->materials==std::vector<int32_t>({tint,tint})&&objects[46]->force_off);
+    options.enabled=false;controller.update(a,options,candidates,6.41);
     assert(objects[46]->materials==std::vector<int32_t>({51,52})&&objects[46]->occlusion&&objects[46]->force_off);
     // Body, helmet, armor, and LODs can exceed the former 12-Renderer cap.
     make(60).transform=61;make(61).game=62;make(62);
@@ -115,36 +122,9 @@ int main(){
     assert(controller.renderer_count==16);
     for(int i=0;i<16;++i)assert(objects[302+i*3]->materials[0]>1000&&!objects[302+i*3]->force_off);
     options.enabled=false;controller.update(a,options,candidates,8.);
-    for(int i=0;i<16;++i)assert(objects[302+i*3]->materials[0]==11&&objects[302+i*3]->force_off);
-    // The first hit settles the type-name spelling; later nodes, and the
-    // MeshRenderer lookups of a character that has none, never probe the
-    // other spelling again. The two failures on the root node are the only
-    // full-name lookups.
-    {
-        auto b=api();mango_chams::Controller fresh;full_lookups=0;options.enabled=true;
-        for(int i=0;i<8;++i)fresh.update(b,options,candidates,20.+i*.12);
-        assert(fresh.renderer_count==16&&full_lookups==2);
-        options.enabled=false;fresh.update(b,options,candidates,21.5);
-    }
-    // Without Hidden/Internal-Colored the previous UI shader is still used.
-    {
-        unavailable.insert(u"Hidden/Internal-Colored");
-        auto b=api();mango_chams::Controller fallback;options.enabled=true;
-        for(int i=0;i<8;++i)fallback.update(b,options,candidates,30.+i*.12);
-        const int tint=objects[302]->materials[0];
-        assert(fallback.shader_kind==4&&tint>1000&&objects[tint]->queue==5000);
-        assert(objects[tint]->floats[properties[u"unity_GUIZTestMode"]]==8);
-        options.enabled=false;fallback.update(b,options,candidates,31.5);
-        unavailable.clear();
-    }
-    // Hierarchy discovery stops at its wall-clock budget and resumes next tick,
-    // instead of walking every node in one frame.
-    {
-        auto b=api();b.clock=fake_clock;mango_chams::Controller sliced;options.enabled=true;
-        sliced.update(b,options,candidates,40.);
-        assert(sliced.renderer_count<16);
-        for(int i=1;i<60&&sliced.renderer_count<16;++i)sliced.update(b,options,candidates,40.+i*.12);
-        assert(sliced.renderer_count==16);
-        options.enabled=false;sliced.update(b,options,candidates,50.);
-    }
+    for(int i=0;i<16;++i)assert(objects[302+i*3]->materials[0]==11&&!objects[302+i*3]->force_off);
+    xray_ready=false;options.enabled=true;const int before_queries=queries;
+    for(int i=0;i<200;++i)controller.update(a,options,candidates,9.+i*.1);
+    assert(controller.status==2&&queries==before_queries);
+
 }

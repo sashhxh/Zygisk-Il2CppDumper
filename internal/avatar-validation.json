@@ -1,0 +1,13 @@
+{
+  "android_platform": 13,
+  "external_dependencies": 0,
+  "vertices_checked": 66162,
+  "max_rest_skin_error": 1.654408530171736e-07,
+  "renderer_count": 22,
+  "texture_format": "ETC2_RGBA8",
+  "textures_decode": true,
+  "max_texture_size": 1024,
+  "depth_test": "LEqual",
+  "humanoid_paths_verified": 21,
+  "device_tested": false
+}

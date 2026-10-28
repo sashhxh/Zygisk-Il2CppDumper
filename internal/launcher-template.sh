@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Standalone launcher v8 / r12j-wrapper-guard for Oxide 1.16.11978 ARM64.
+# Standalone launcher v8 / r15-full-body-bone-scales for Oxide 1.16.11978 ARM64.
 # Android ARM64, root; both native files are embedded below.
 set -eu
 
@@ -76,7 +76,7 @@ find_game_pid() {
 }
 
 restart_game() {
-    printf '%s\n' 'Лоадер v8 (r12j-wrapper-guard): перезапускаю Oxide с -force-gles30. Текущая сессия игры закроется.'
+    printf '%s\n' 'Лоадер v8 (r15-full-body-bone-scales): перезапускаю Oxide с -force-gles30. Текущая сессия игры закроется.'
     find_game_pid
     if [ -n "$GAME_PID" ]; then
         printf 'Останавливаю старый процесс: PID %s\n' "$GAME_PID"
@@ -176,13 +176,6 @@ if "$RUNTIME/cfinject" "$PACKAGE" "$LIBRARY"; then
         printf '%s\n' 'dlopen выполнен, библиотека присутствует в процессе игры.' \
             'Появление меню проверяй в игре.'
         printf 'Логи только нового процесса: logcat --pid=%s -s Unity MANGOcheat OxideBypass\n' "$GAME_PID"
-        LOG_FILE="/data/user/$USER_ID/$PACKAGE/files/mango_log.txt"
-        printf 'Лог-файл: %s\n' "$LOG_FILE"
-        printf 'Скопировать в Download: su -c "cp %s /sdcard/Download/mango_log.txt"\n' "$LOG_FILE"
-        # Keep /sdcard/Download/mango_log.txt current for 20 minutes (one copy used to freeze
-        # at the first 6 seconds and was mistaken for the whole log).
-        nohup sh -c 'i=0; while [ "$i" -lt 400 ]; do sleep 3; cp "$1" /sdcard/Download/mango_log.txt 2>/dev/null; i=$((i+1)); done' sh "$LOG_FILE" >/dev/null 2>&1 &
-        printf '%s\n' 'Лог копируется в /sdcard/Download/mango_log.txt каждые 3 с (20 минут).'
     else
         fail 'После загрузки процесс завершился или библиотека отсутствует. Нужен logcat.'
     fi

@@ -1,16 +1,15 @@
 #pragma once
 #include "chams.h"
+#include "local_player_view.h"
 #include <cmath>
-#include <cstdio>
 
 namespace mango_camera {
-// The game hides the local body from the normal passes by moving its renderers to another
-// URP rendering layer (FirstPersonRenderController + FirstPersonRenderFeature draw them only in
-// the first-person pass); the default layer is bit 0.
-constexpr uint32_t kBodyRenderingLayer=1u;
-constexpr bool kCameraOcclusionFallback=false;
 struct V3 {float x=0,y=0,z=0;};
 struct Quaternion {float x=0,y=0,z=0,w=1;};
+struct Matrix {float v[16]{};};
+inline bool finite(Matrix m){for(float v:m.v)if(!std::isfinite(v))return false;return true;}
+inline bool near(Matrix a,Matrix b){if(!finite(a)||!finite(b))return false;for(unsigned i=0;i<16;++i)if(std::fabs(a.v[i]-b.v[i])>.002f+std::fabs(b.v[i])*.00001f)return false;return true;}
+inline Matrix translate_view(Matrix m,V3 delta){for(unsigned row=0;row<4;++row)m.v[12+row]-=m.v[row]*delta.x+m.v[4+row]*delta.y+m.v[8+row]*delta.z;return m;}
 inline V3 add(V3 a,V3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
 inline V3 sub(V3 a,V3 b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
 inline V3 scale(V3 a,float s){return {a.x*s,a.y*s,a.z*s};}
@@ -24,10 +23,14 @@ struct Api {
     mango_chams::Api* objects=nullptr;
     void(*position)(void*,V3*)=nullptr;
     void(*set_position)(void*,V3*)=nullptr;
-    void(*rotation)(void*,Quaternion*)=nullptr;
+    void(*rotation)(void*,Quaternion*)=nullptr;void(*set_rotation)(void*,Quaternion*)=nullptr;
+    void(*local_scale)(void*,V3*)=nullptr;void(*set_local_scale)(void*,V3*)=nullptr;
+    void(*local_position)(void*,V3*)=nullptr;void(*set_local_position)(void*,V3*)=nullptr;
+    void*(*bone)(void*,int)=nullptr; // managed Animator -> managed Transform
     int(*mask)(void*)=nullptr;void(*set_mask)(void*,int)=nullptr;
     bool(*enabled)(void*)=nullptr;void(*set_enabled)(void*,bool)=nullptr;
     int(*shadows)(void*)=nullptr;void(*set_shadows)(void*,int)=nullptr;
+    uint32_t(*render_layers)(void*)=nullptr;void(*set_render_layers)(void*,uint32_t)=nullptr;
     int(*layer)(void*)=nullptr;bool(*active)(void*)=nullptr;
     bool(*is_child)(void*,void*)=nullptr;
     void*(*parent)(void*)=nullptr;
@@ -36,32 +39,30 @@ struct Api {
     bool(*behaviour)(void*)=nullptr;void(*set_behaviour)(void*,bool)=nullptr;
     int(*culling)(void*)=nullptr;void(*set_culling)(void*,int)=nullptr;
     bool(*offscreen)(void*)=nullptr;void(*set_offscreen)(void*,bool)=nullptr;
+    void(*view)(void*,Matrix*)=nullptr;void(*set_view)(void*,Matrix*)=nullptr;
+    void(*cull_matrix)(void*,Matrix*)=nullptr;void(*set_cull_matrix)(void*,Matrix*)=nullptr;
+    int view_auto_offset=-1,cull_auto_offset=-1;
     float(*collision)(void*,V3,V3,float)=nullptr;void* collision_context=nullptr;
-    // Optional, diagnostics only: why an enabled renderer is still not drawn.
-    bool(*is_visible)(void*)=nullptr;
-    void(*bounds)(void*,float*)=nullptr;   // center xyz, extents xyz
-    void(*lossy_scale)(void*,V3*)=nullptr;
-    void*(*shared_mesh)(void*)=nullptr;
-    bool(*camera_occlusion)(void*)=nullptr;void(*set_camera_occlusion)(void*,bool)=nullptr;
-    // A game that sets Camera.cullingMatrix (floating-origin / first-person tricks) makes the
-    // engine cull with a frustum that does not follow our shifted camera.
-    uint32_t(*rendering_layer)(void*)=nullptr;void(*set_rendering_layer)(void*,uint32_t)=nullptr;
-    float(*near_clip)(void*)=nullptr,(*far_clip)(void*)=nullptr,(*field_of_view)(void*)=nullptr;
-    void(*reset_culling)(void*)=nullptr;
-    void(*culling_matrix)(void*,float*)=nullptr,(*view_matrix)(void*,float*)=nullptr,(*projection_matrix)(void*,float*)=nullptr;
     bool loaded=false;
     bool load(mango_chams::Api::Resolve resolve,mango_chams::Api& api){
         if(loaded)return true;objects=&api;
-#define TP_BIND(member,name) member=reinterpret_cast<decltype(member)>(resolve(name));if(!member){if(api.log)api.log("missing icall: " name);return false;}
+#define TP_BIND(member,name) member=reinterpret_cast<decltype(member)>(resolve(name));if(!member)return false
         TP_BIND(position,"UnityEngine.Transform::get_position_Injected(System.IntPtr,UnityEngine.Vector3&)");
         TP_BIND(set_position,"UnityEngine.Transform::set_position_Injected(System.IntPtr,UnityEngine.Vector3&)");
         TP_BIND(rotation,"UnityEngine.Transform::get_rotation_Injected(System.IntPtr,UnityEngine.Quaternion&)");
+        TP_BIND(set_rotation,"UnityEngine.Transform::set_rotation_Injected(System.IntPtr,UnityEngine.Quaternion&)");
+        TP_BIND(local_scale,"UnityEngine.Transform::get_localScale_Injected(System.IntPtr,UnityEngine.Vector3&)");
+        TP_BIND(set_local_scale,"UnityEngine.Transform::set_localScale_Injected(System.IntPtr,UnityEngine.Vector3&)");
+        TP_BIND(local_position,"UnityEngine.Transform::get_localPosition_Injected(System.IntPtr,UnityEngine.Vector3&)");
+        TP_BIND(set_local_position,"UnityEngine.Transform::set_localPosition_Injected(System.IntPtr,UnityEngine.Vector3&)");
         TP_BIND(mask,"UnityEngine.Camera::get_cullingMask_Injected(System.IntPtr)");
         TP_BIND(set_mask,"UnityEngine.Camera::set_cullingMask_Injected(System.IntPtr,System.Int32)");
         TP_BIND(enabled,"UnityEngine.Renderer::get_enabled_Injected(System.IntPtr)");
         TP_BIND(set_enabled,"UnityEngine.Renderer::set_enabled_Injected(System.IntPtr,System.Boolean)");
         TP_BIND(shadows,"UnityEngine.Renderer::get_shadowCastingMode_Injected(System.IntPtr)");
         TP_BIND(set_shadows,"UnityEngine.Renderer::set_shadowCastingMode_Injected(System.IntPtr,UnityEngine.Rendering.ShadowCastingMode)");
+        TP_BIND(render_layers,"UnityEngine.Renderer::get_renderingLayerMask_Injected(System.IntPtr)");
+        TP_BIND(set_render_layers,"UnityEngine.Renderer::set_renderingLayerMask_Injected(System.IntPtr,System.UInt32)");
         TP_BIND(layer,"UnityEngine.GameObject::get_layer_Injected(System.IntPtr)");
         TP_BIND(active,"UnityEngine.GameObject::get_activeInHierarchy_Injected(System.IntPtr)");
         TP_BIND(is_child,"UnityEngine.Transform::IsChildOf_Injected(System.IntPtr,System.IntPtr)");
@@ -75,23 +76,108 @@ struct Api {
         TP_BIND(set_culling,"UnityEngine.Animator::set_cullingMode_Injected(System.IntPtr,UnityEngine.AnimatorCullingMode)");
         TP_BIND(offscreen,"UnityEngine.SkinnedMeshRenderer::get_updateWhenOffscreen_Injected(System.IntPtr)");
         TP_BIND(set_offscreen,"UnityEngine.SkinnedMeshRenderer::set_updateWhenOffscreen_Injected(System.IntPtr,System.Boolean)");
-        is_visible=reinterpret_cast<decltype(is_visible)>(resolve("UnityEngine.Renderer::get_isVisible_Injected(System.IntPtr)"));
-        bounds=reinterpret_cast<decltype(bounds)>(resolve("UnityEngine.Renderer::get_bounds_Injected(System.IntPtr,UnityEngine.Bounds&)"));
-        lossy_scale=reinterpret_cast<decltype(lossy_scale)>(resolve("UnityEngine.Transform::get_lossyScale_Injected(System.IntPtr,UnityEngine.Vector3&)"));
-        shared_mesh=reinterpret_cast<decltype(shared_mesh)>(resolve("UnityEngine.SkinnedMeshRenderer::get_sharedMesh_Injected(System.IntPtr)"));
-        camera_occlusion=reinterpret_cast<decltype(camera_occlusion)>(resolve("UnityEngine.Camera::get_useOcclusionCulling_Injected(System.IntPtr)"));
-        set_camera_occlusion=reinterpret_cast<decltype(set_camera_occlusion)>(resolve("UnityEngine.Camera::set_useOcclusionCulling_Injected(System.IntPtr,System.Boolean)"));
-        reset_culling=reinterpret_cast<decltype(reset_culling)>(resolve("UnityEngine.Camera::ResetCullingMatrix_Injected(System.IntPtr)"));
-        culling_matrix=reinterpret_cast<decltype(culling_matrix)>(resolve("UnityEngine.Camera::get_cullingMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
-        view_matrix=reinterpret_cast<decltype(view_matrix)>(resolve("UnityEngine.Camera::get_worldToCameraMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
-        projection_matrix=reinterpret_cast<decltype(projection_matrix)>(resolve("UnityEngine.Camera::get_nonJitteredProjectionMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
-        rendering_layer=reinterpret_cast<decltype(rendering_layer)>(resolve("UnityEngine.Renderer::get_renderingLayerMask_Injected(System.IntPtr)"));
-        set_rendering_layer=reinterpret_cast<decltype(set_rendering_layer)>(resolve("UnityEngine.Renderer::set_renderingLayerMask_Injected(System.IntPtr,System.UInt32)"));
-        near_clip=reinterpret_cast<decltype(near_clip)>(resolve("UnityEngine.Camera::get_nearClipPlane_Injected(System.IntPtr)"));
-        far_clip=reinterpret_cast<decltype(far_clip)>(resolve("UnityEngine.Camera::get_farClipPlane_Injected(System.IntPtr)"));
-        field_of_view=reinterpret_cast<decltype(field_of_view)>(resolve("UnityEngine.Camera::get_fieldOfView_Injected(System.IntPtr)"));
 #undef TP_BIND
+        view=reinterpret_cast<decltype(view)>(resolve("UnityEngine.Camera::get_worldToCameraMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
+        set_view=reinterpret_cast<decltype(set_view)>(resolve("UnityEngine.Camera::set_worldToCameraMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
+        cull_matrix=reinterpret_cast<decltype(cull_matrix)>(resolve("UnityEngine.Camera::get_cullingMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
+        set_cull_matrix=reinterpret_cast<decltype(set_cull_matrix)>(resolve("UnityEngine.Camera::set_cullingMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
+        view_auto_offset=mango_unity::camera_matrix_auto_offset(reinterpret_cast<uintptr_t>(set_view),api.read);
+        cull_auto_offset=mango_unity::camera_matrix_auto_offset(reinterpret_cast<uintptr_t>(set_cull_matrix),api.read);
         loaded=objects->loaded;return loaded;
+    }
+};
+// PlayerView_Local ships with zero-scale neck/arm bones, stretched spine bones,
+// and a LateUpdate component that pushes the spine away from a first-person
+// camera. Restore those presentation changes without changing animated poses.
+class LocalBodyGeometry {
+    struct Ref {int32_t id=0;uintptr_t native=0;};
+    struct Bone {Ref ref;V3 original{};bool owned=false;};
+    struct Offset {Ref bone;unsigned index=0;};
+    std::vector<Bone> bones_;std::vector<Offset> offsets_;
+    Ref component_{};bool shown_=false,component_owned_=false,component_enabled_=false;
+    unsigned endpoints_=0;
+    static bool near(V3 a,V3 b){return finite(a)&&finite(b)&&length(sub(a,b))<.00001f;}
+    static bool first_person_scale(V3 v){
+        return near(v,{0,0,0})||near(v,{1,1.2f,1})||near(v,{.8f,1.2f,1});
+    }
+    Ref ref(Api& api,void* managed){return {api.objects->id(managed),reinterpret_cast<uintptr_t>(api.objects->native(managed))};}
+    void hold(Api& api,Ref r){if(api.objects->retain)api.objects->retain(r.id,r.native);}
+    void drop(Api& api,Ref r){if(api.objects->release)api.objects->release(r.id,r.native);}
+    void* live(Api& api,Ref r){return api.objects->live_native(r.id,r.native);}
+    void undo_offsets(Api& api){
+        auto& o=*api.objects;void* managed=o.find(component_.id);
+        if(reinterpret_cast<uintptr_t>(o.native(managed))!=component_.native||!o.field<uint8_t>(managed,0x38)||!api.local_position||!api.set_local_position)return;
+        void* before=o.field<void*>(managed,0x28);void* after=o.field<void*>(managed,0x30);
+        const auto n_before=o.field<uintptr_t>(before,0x18),n_after=o.field<uintptr_t>(after,0x18);
+        if(n_before>16||n_after>16)return;
+        for(auto offset:offsets_){
+            if(offset.index>=n_before||offset.index>=n_after)continue;
+            void* p=live(api,offset.bone);if(!p)continue;
+            V3 a=o.field<V3>(before,0x20+offset.index*sizeof(V3)),b=o.field<V3>(after,0x20+offset.index*sizeof(V3)),current{};
+            api.local_position(p,&current);
+            // Animator may already have replaced the position. Only undo a
+            // displacement still matching the component's recorded result.
+            if(finite(a)&&near(current,b))api.set_local_position(p,&a);
+        }
+    }
+public:
+    bool complete()const{return endpoints_==3;}
+    void show(Api& api,bool visible){
+        if(visible&&!shown_){
+            if(void* p=live(api,component_)){
+                component_enabled_=api.behaviour(p);component_owned_=component_enabled_;
+                if(component_owned_){api.set_behaviour(p,false);undo_offsets(api);}
+            }
+        }
+        if(visible&&api.local_scale&&api.set_local_scale){
+            for(auto& bone:bones_)if(void* p=live(api,bone.ref)){
+                V3 current{};api.local_scale(p,&current);
+                if(first_person_scale(current)){
+                    if(!bone.owned)bone.original=current;
+                    V3 unit{1,1,1};api.set_local_scale(p,&unit);bone.owned=true;
+                }else if(bone.owned&&!near(current,{1,1,1}))bone.owned=false;
+            }
+        }
+        if(!visible){
+            for(auto& bone:bones_)if(bone.owned){
+                if(void* p=live(api,bone.ref)){V3 current{};api.local_scale(p,&current);if(near(current,{1,1,1}))api.set_local_scale(p,&bone.original);}
+                bone.owned=false;
+            }
+            if(component_owned_)if(void* p=live(api,component_))if(!api.behaviour(p))api.set_behaviour(p,component_enabled_);
+            component_owned_=false;
+        }
+        shown_=visible;
+    }
+    void reset(Api& api){
+        show(api,false);for(auto b:bones_)drop(api,b.ref);for(auto o:offsets_)drop(api,o.bone);drop(api,component_);
+        bones_.clear();offsets_.clear();component_={};shown_=component_owned_=component_enabled_=false;endpoints_=0;
+    }
+    void bind(Api& api,void* animator){
+        reset(api);if(!api.bone||!api.local_scale||!api.set_local_scale)return;
+        auto& o=*api.objects;void* native=o.native(animator);if(!native)return;
+        void* stop=o.native_return(o.transform(native));
+        // Head and both hands cover neck, shoulders, upper arms and every
+        // spine ancestor, including spine bones absent from the humanoid map.
+        for(int human:{10,17,18}){
+            void* managed=api.bone(animator,human);
+            if(o.native(managed))++endpoints_;
+            for(unsigned depth=0;managed&&depth<16&&bones_.size()<24;++depth){
+                Ref r=ref(api,managed);void* p=o.native(managed);if(!r.id||!p||p==stop)break;
+                if(std::any_of(bones_.begin(),bones_.end(),[&](const Bone& b){return b.ref.id==r.id&&b.ref.native==r.native;}))break;
+                V3 original{};api.local_scale(p,&original);if(!finite(original))break;
+                hold(api,r);bones_.push_back({r,original,false});managed=o.decode(api.parent(p));
+            }
+        }
+        void* go=o.native_return(o.game_object(native));if(!go||!o.component)return;
+        auto name=mango_chams::span(u"HyperHug.Games.Oxide.Features.Player.FirstPersonBodyOffsets");
+        void* managed=o.decode(o.component(go,&name));
+        if(!o.native(managed)){auto short_name=mango_chams::span(u"FirstPersonBodyOffsets");managed=o.decode(o.component(go,&short_name));}
+        component_=ref(api,managed);if(!component_.id)return;hold(api,component_);
+        void* array=o.field<void*>(managed,0x20);const auto count=o.field<uintptr_t>(array,0x18);if(count>16)return;
+        for(unsigned i=0;i<count;++i){
+            Ref r=ref(api,o.field<void*>(array,0x20+i*24));if(!r.id)continue;
+            hold(api,r);offsets_.push_back({r,i});
+        }
     }
 };
 class LocalModel {
@@ -102,9 +188,13 @@ class LocalModel {
     std::vector<Behaviour> behaviours_;
     std::vector<Ref> targets_,primary_;
     Ref animator_{};int original_culling_=0;bool visible_=false;
-    double retry_=0;
+    LocalBodyGeometry geometry_;bool local_=false;
+    unsigned geometry_attempts_=0;double next_geometry_=0;
+    double retry_=0,next_show_=0;void* info_=nullptr;
     Ref ref(Api& api,void* managed){return {api.objects->id(managed),reinterpret_cast<uintptr_t>(api.objects->native(managed))};}
-    void* live(Api& api,Ref r){void* p=api.objects->live(r.id);return reinterpret_cast<uintptr_t>(p)==r.native?p:nullptr;}
+    void* live(Api& api,Ref r){return api.objects->live_native(r.id,r.native);}
+    void hold(Api& api,Ref r){if(api.objects->retain)api.objects->retain(r.id,r.native);}
+    void drop(Api& api,Ref r){if(api.objects->release)api.objects->release(r.id,r.native);}
     void activate(Api& api,void* go){
         auto& o=*api.objects;
         for(unsigned depth=0;go&&depth<32;++depth){
@@ -115,7 +205,7 @@ class LocalModel {
                 // GetComponent returns the Transform; obtain its GameObject's
                 // managed identity rather than treating a native pointer as one.
                 if(!r.id)break;
-                if(std::none_of(active_.begin(),active_.end(),[&](const Active& a){return a.object.id==r.id&&a.object.native==r.native;}))active_.push_back({r,false});
+                if(std::none_of(active_.begin(),active_.end(),[&](const Active& a){return a.object.id==r.id&&a.object.native==r.native;})){hold(api,r);active_.push_back({r,false});}
                 api.set_active(go,true);
             }
             if(api.active(go))break;
@@ -126,339 +216,270 @@ class LocalModel {
     }
     void behaviour(Api& api,void* managed){
         Ref r=ref(api,managed);void* p=live(api,r);if(!p)return;
-        if(std::none_of(behaviours_.begin(),behaviours_.end(),[&](const Behaviour& b){return b.object.id==r.id&&b.object.native==r.native;}))behaviours_.push_back({r,api.behaviour(p)});
+        if(std::none_of(behaviours_.begin(),behaviours_.end(),[&](const Behaviour& b){return b.object.id==r.id&&b.object.native==r.native;})){hold(api,r);behaviours_.push_back({r,api.behaviour(p)});}
     }
-    void inspect(Api& api,void* managed,double time){
+    void inspect(Api& api,void* managed,void* model,double time){
         auto& o=*api.objects;void* native=o.native(managed);if(!native)return;
         void* go=o.native_return(o.game_object(native));if(!go)return;
-        Ref r=ref(api,o.decode(o.game_object(native)));if(r.id)targets_.push_back(r);
+        const Ref root=ref(api,o.decode(o.game_object(native)));if(root.id){hold(api,root);targets_.push_back(root);}
         behaviour(api,managed);
-        auto model_name=mango_chams::span(u"PlayerModelInfo");void* model=o.decode(o.component(go,&model_name));
-        if(!model){auto full=mango_chams::span(u"HyperHug.Games.Oxide.Features.Player.PlayerModelInfo");model=o.decode(o.component(go,&full));}
+        if(local_){geometry_.bind(api,managed);geometry_attempts_=1;next_geometry_=time+1;}
         if(model&&o.named_ref){
             for(const char* name:{"body","headModel"}){
                 void* transform=o.native(o.named_ref(model,name));
-                Ref r=ref(api,transform?o.decode(o.game_object(transform)):nullptr);if(r.id)targets_.push_back(r);
+                Ref r=ref(api,transform?o.decode(o.game_object(transform)):nullptr);if(r.id){hold(api,r);targets_.push_back(r);}
             }
-            for(const char* name:{"skinnedMeshRenderer","headRenderer"}){Ref r=ref(api,o.named_ref(model,name));if(r.id)primary_.push_back(r);}
+            for(const char* name:{"skinnedMeshRenderer","headRenderer"}){Ref r=ref(api,o.named_ref(model,name));if(r.id){hold(api,r);primary_.push_back(r);}}
             behaviour(api,o.named_ref(model,"characterAnimation"));
         }
-        auto animation=mango_chams::span(u"CharacterAnimation");void* script=o.decode(o.component(go,&animation));
-        if(!script){auto full=mango_chams::span(u"HyperHug.Games.Oxide.Features.Player.CharacterAnimation");script=o.decode(o.component(go,&full));}
-        behaviour(api,script);
         retry_=time+1;
     }
 public:
     void reset(Api& api){
-        show(api,false);active_.clear();behaviours_.clear();targets_.clear();primary_.clear();animator_={};retry_=0;
+        show(api,false);geometry_.reset(api);local_=false;geometry_attempts_=0;next_geometry_=0;for(auto a:active_)drop(api,a.object);for(auto b:behaviours_)drop(api,b.object);for(auto r:targets_)drop(api,r);for(auto r:primary_)drop(api,r);
+        active_.clear();behaviours_.clear();targets_.clear();primary_.clear();animator_={};retry_=next_show_=0;info_=nullptr;
     }
     void show(Api& api,bool visible){
         if(!api.loaded)return;
         if(!visible){
+            geometry_.show(api,false);
             for(auto& b:behaviours_)if(void* p=live(api,b.object))if(api.behaviour(p))api.set_behaviour(p,b.original);
-            if(void* p=live(api,animator_))if(api.culling(p)==0)api.set_culling(p,original_culling_);
             for(auto it=active_.rbegin();it!=active_.rend();++it)if(void* go=live(api,it->object))if(api.active_self(go))api.set_active(go,it->original);
         }else{
             for(auto r:targets_)if(void* go=live(api,r))activate(api,go);
             for(auto b:behaviours_)if(void* p=live(api,b.object))if(!api.behaviour(p))api.set_behaviour(p,true);
-            if(void* p=live(api,animator_))if(api.culling(p)!=0)api.set_culling(p,0);
+            geometry_.show(api,true);
         }
         visible_=visible;
     }
-    void update(Api& api,void* managed,bool visible,double time){
-        const Ref r=ref(api,managed);
-        if(r.id!=animator_.id||r.native!=animator_.native){reset(api);animator_=r;if(r.id){original_culling_=api.culling(api.objects->native(managed));inspect(api,managed,time);}}
+    void update(Api& api,void* managed,void* info,bool visible,double time,bool local=false){
+        const uintptr_t native=reinterpret_cast<uintptr_t>(api.objects->native(managed));
+        const Ref r=native==animator_.native&&info_==info?animator_:ref(api,managed);
+        if(r.id!=animator_.id||r.native!=animator_.native||info_!=info||local_!=local){reset(api);animator_=r;info_=info;local_=local;if(r.id)inspect(api,managed,info,time);}
         // A model's equipment / script may finish initialization after Animator.
-        else if(r.id&&primary_.empty()&&time>=retry_){targets_.clear();inspect(api,managed,time);}
-        show(api,visible);
+        else if(r.id&&primary_.empty()&&time>=retry_){for(auto r:targets_)drop(api,r);targets_.clear();inspect(api,managed,info,time);}
+        else if(r.id&&local_&&!geometry_.complete()&&geometry_attempts_<3&&time>=next_geometry_){
+            geometry_.bind(api,managed);++geometry_attempts_;next_geometry_=time+1;
+        }
+        if(visible!=visible_||time>=next_show_){show(api,visible);next_show_=time+.2;}
     }
-    void before_animation(Api& api){if(visible_)show(api,true);}
-    // Native GameObjects of the model targets (animator root, body, head).
-    template<class F>void each_object(Api& api,F f){for(auto r:targets_)if(void* go=live(api,r))f(go);}
+    void before_animation(Api&){ }
     const auto& primary()const{return primary_;}
     bool has_primary()const{return !primary_.empty();}
 };
 class Controller {
-    struct Renderer {
-        int32_t id=0;uintptr_t native=0;
-        bool enabled=false,fp=false,skinned=false,offscreen=false,force_off=false;
-        bool occlusion=true,occlusion_owned=false;
-        int shadows=0,layer=0;
-        uintptr_t go=0; // a Renderer never changes GameObject; saves 3 calls per frame
-        uint32_t rlm=kBodyRenderingLayer;bool rlm_owned=false;
-    };
+    struct Renderer {int32_t id=0;uintptr_t native=0;bool enabled=false,fp=false,primary=false,force_off=false;int shadows=0,layer=0;uint32_t render_layers=0,applied_layers=0;bool layers_owned=false,occlusion=false,weapon=false,avatar_hidden=false;};
     std::vector<Renderer> renderers_;
     LocalModel model_;
-    std::deque<int32_t> queue_;std::unordered_set<int32_t> visited_;
-    bool fp_root_known_=false,camera_occlusion_owned_=false,camera_occlusion_original_=true;
-    double invisible_since_=-1;
-    float cull_diff_=-1;unsigned culling_resets_=0;
-    char report_[768]{},detail_[1800]{};bool report_ready_=false;double next_report_=0;
-    int32_t camera_=0,transform_=0;
-    uintptr_t camera_native_=0,transform_native_=0,owner_=0,fp_=0,weapon_=0,animator_=0;
-    uintptr_t supplied_animator_=0,fallback_animator_native_=0;int32_t fallback_animator_=0;
-    V3 baseline_{},applied_{};
-    int applied_frame_=-1;
-    bool shifted_=false,mask_owned_=false;
-    int original_mask_=0,applied_mask_=0;
-    double next_scan_=0;
+    int32_t camera_=0,transform_=0;uintptr_t camera_native_=0,transform_native_=0,owner_=0,fp_=0,weapon_=0,animator_=0;
+    V3 baseline_{},applied_{};int applied_frame_=-1;bool shifted_=false,mask_owned_=false;
+    int original_mask_=0,applied_mask_=0;double next_refresh_=0,next_flags_=0;bool body_view_=false;
+    Matrix original_view_{},applied_view_{},original_cull_{},applied_cull_{};bool view_owned_=false,cull_owned_=false;
+    int32_t pass_id_=0;uintptr_t pass_native_=0;bool pass_enabled_=false,pass_owned_=false;
+    uint32_t reserved_layers_=0;void* model_info_=nullptr;uintptr_t weapon_visual_=0;bool replacement_=false;
+    void restore_pass(Api& api){
+        if(pass_owned_)if(void* p=api.objects->live_native(pass_id_,pass_native_))if(!api.behaviour(p))api.set_behaviour(p,pass_enabled_);
+        if(api.objects->release)api.objects->release(pass_id_,pass_native_);
+        pass_id_=0;pass_native_=0;pass_owned_=false;
+    }
+    void update_pass(Api& api,void* managed,bool visible){
+        auto& o=*api.objects;const auto native=reinterpret_cast<uintptr_t>(o.native(managed));
+        if(native!=pass_native_){restore_pass(api);pass_id_=o.id(managed);pass_native_=native;if(pass_id_&&o.retain)o.retain(pass_id_,native);}
+        void* p=o.live_native(pass_id_,pass_native_);if(!p)return;
+        if(visible){if(!pass_owned_){pass_enabled_=api.behaviour(p);pass_owned_=true;}if(api.behaviour(p))api.set_behaviour(p,false);}
+        else if(pass_owned_){if(!api.behaviour(p))api.set_behaviour(p,pass_enabled_);pass_owned_=false;}
+    }
     void restore_renderer(Api& api,Renderer& r){
-        void* p=api.objects->live(r.id);if(reinterpret_cast<uintptr_t>(p)!=r.native)return;
-        const bool show=!r.fp;
-        if(api.enabled(p)==show)api.set_enabled(p,r.enabled);
-        if(!r.fp&&api.shadows(p)==1)api.set_shadows(p,r.shadows);
-        if(!r.fp&&r.skinned&&api.offscreen(p))api.set_offscreen(p,r.offscreen);
-        if(!r.fp&&r.occlusion_owned&&api.objects->occlusion&&!api.objects->occlusion(p))api.objects->set_occlusion(p,r.occlusion);
-        if(!r.fp&&r.rlm_owned&&api.rendering_layer&&api.rendering_layer(p)==kBodyRenderingLayer)api.set_rendering_layer(p,r.rlm);
-        if(!r.fp&&api.objects->force_off_offset>=0&&!api.objects->field<uint8_t>(p,size_t(api.objects->force_off_offset)))api.objects->set_force_off(p,r.force_off);
+        void* p=api.objects->live_native(r.id,r.native);if(!p)return;
+        if(api.enabled(p)==(!r.fp&&!r.avatar_hidden))api.set_enabled(p,r.enabled);
+        r.avatar_hidden=false;
+        if(!r.fp&&r.shadows==3&&api.shadows(p)==1)api.set_shadows(p,r.shadows);
+        if(r.layers_owned&&api.render_layers(p)==r.applied_layers)api.set_render_layers(p,r.render_layers);
+        r.layers_owned=false;
+        if(!r.fp&&api.objects->occlusion&&!api.objects->occlusion(p))api.objects->set_occlusion(p,r.occlusion);
+        if(r.primary&&api.objects->force_off_offset>=0&&!api.objects->field<uint8_t>(p,size_t(api.objects->force_off_offset)))api.objects->set_force_off(p,r.force_off);
     }
-    void add_renderer(Api& api,int32_t id,bool fp,bool skinned){
+    void add_renderer(Api& api,int32_t id,bool first_person,bool primary){
         auto& o=*api.objects;
-        if(!id||renderers_.size()>=64||std::any_of(renderers_.begin(),renderers_.end(),[&](const Renderer& r){return r.id==id;}))return;
-        void* native=o.live(id);if(!native)return;
-        void* go=o.native_return(o.game_object(native));if(!go)return;
+        if(!id||renderers_.size()>=32||std::any_of(renderers_.begin(),renderers_.end(),[&](const Renderer& r){return r.id==id;}))return;
+        void* p=o.live(id);if(!p)return;void* go=o.native_return(o.game_object(p));if(!go)return;
+        const bool enabled=api.enabled(p);const bool force=o.force_off_offset>=0&&o.field<uint8_t>(p,size_t(o.force_off_offset));
+        if(!primary&&!first_person&&(!enabled||force||!api.active(go)))return;
         const int layer=api.layer(go);
-        renderers_.push_back({id,reinterpret_cast<uintptr_t>(native),api.enabled(native),fp,skinned,skinned?api.offscreen(native):false,
-            o.force_off_offset>=0?o.field<uint8_t>(native,size_t(o.force_off_offset))!=0:false,
-            o.occlusion?o.occlusion(native):true,false,api.shadows(native),layer,reinterpret_cast<uintptr_t>(go)});
-    }
-    void discover(Api& api,void* owner,void* fp,void* weapon,void* animator,double time){
-        auto& objects=*api.objects;
-        void* root=objects.native_return(objects.transform(owner));
-        void* fp_root=fp?objects.native_return(objects.transform(fp)):nullptr;
-        void* weapon_root=weapon?objects.native_return(objects.transform(weapon)):nullptr;
-        if(fp_root==root)fp_root=nullptr;
-        if(weapon_root==root)weapon_root=nullptr;
-        fp_root_known_=fp_root!=nullptr;
-        if(queue_.empty()&&time>=next_scan_){
-            // A model that already has renderers is rescanned rarely (armor
-            // swaps); a scan that found nothing is retried sooner.
-            visited_.clear();next_scan_=time+(renderers_.empty()?.75:4.);
-            const int32_t id=objects.returned_id(objects.transform(owner));if(id)queue_.push_back(id);
-            if(animator){const int32_t id=objects.returned_id(objects.transform(animator));if(id)queue_.push_front(id);}
-            // Prioritize the view-model branch on enable / weapon changes.
-            if(fp){const int32_t id=objects.returned_id(objects.transform(fp));if(id)queue_.push_front(id);}
-            if(weapon){const int32_t id=objects.returned_id(objects.transform(weapon));if(id)queue_.push_front(id);}
-        }
-        // Wall-clock budget: this runs on the render-critical main thread
-        // every frame while a scan is in flight.
-        const double deadline=objects.deadline(.0006);
-        // Layer 8 alone does not make a mesh a viewmodel: the local body may be
-        // drawn from it too. Meshes under the character model are body.
-        void* model_root=animator?objects.native_return(objects.transform(animator)):nullptr;
-        unsigned budget=64;
-        while(budget--&&!queue_.empty()&&visited_.size()<768&&!objects.expired(deadline)){
-            const int32_t id=queue_.front();queue_.pop_front();
-            if(!visited_.insert(id).second)continue;
-            void* t=objects.live(id);if(!t)continue;
-            void* go=objects.native_return(objects.game_object(t));if(!go)continue;
-            if(!model_.has_primary()&&!fallback_animator_){
-                auto animator_name=mango_chams::span(u"Animator");void* value=objects.component(go,&animator_name);
-                if(value){
-                    auto model_name=mango_chams::span(u"PlayerModelInfo");void* model=objects.component(go,&model_name);
-                    if(!model){auto full=mango_chams::span(u"HyperHug.Games.Oxide.Features.Player.PlayerModelInfo");model=objects.component(go,&full);}
-                    if(model){fallback_animator_=objects.returned_id(value);fallback_animator_native_=reinterpret_cast<uintptr_t>(objects.native_return(value));}
-                }
+        // An explicitly bound body renderer takes precedence over a layer that
+        // was assigned by the game's first-person setup.
+        renderers_.push_back({id,reinterpret_cast<uintptr_t>(p),enabled,!primary&&first_person,primary,force,api.shadows(p),layer});
+        auto& r=renderers_.back();r.render_layers=api.render_layers?api.render_layers(p):0;
+        r.occlusion=o.occlusion&&o.occlusion(p);
+        if(!r.fp&&model_info_&&o.named_ref&&api.is_child){
+            void* tr=o.native_return(o.transform(p));
+            for(const char* name:{"rightWeaponHolder","leftWeaponHolder"}){
+                void* holder=o.native(o.named_ref(model_info_,name));
+                if(tr&&holder&&(tr==holder||api.is_child(tr,holder)))r.weapon=true;
             }
-            const bool in_model=model_root&&(t==model_root||api.is_child(t,model_root));
-            const bool first_person=(fp_root&&(t==fp_root||api.is_child(t,fp_root)))||
-                (weapon_root&&(t==weapon_root||api.is_child(t,weapon_root)))||
-                (!in_model&&api.layer(go)==8);
-            for(bool skinned:{true,false})add_renderer(api,objects.renderer_id(go,skinned),first_person,skinned);
-            const int n=std::clamp(objects.child_count(t),0,64);
-            for(int i=0;i<n&&queue_.size()+visited_.size()<768;++i){const int32_t child=objects.returned_id(objects.child(t,i));if(child)queue_.push_back(child);}
         }
+        if(o.retain)o.retain(id,reinterpret_cast<uintptr_t>(p));
+    }
+    void collect(Api& api,void* root,bool fp,bool layer_only=false){
+        auto& o=*api.objects;void* array=o.collect(root);const uintptr_t count=o.field<uintptr_t>(array,0x18);
+        if(count>256)return;
+        for(size_t i=0;i<count;++i){void* object=o.item(array,int(i));if(!object||(o.is_mesh&&!o.is_mesh(object)))continue;
+            if(layer_only){void* p=o.native(object);void* go=p?o.native_return(o.game_object(p)):nullptr;if(!go||api.layer(go)!=8)continue;}
+            add_renderer(api,o.id(object),fp,false);}
     }
 public:
     int status=0;unsigned body_meshes=0;
     uintptr_t native_transform()const{return transform_native_;}
     int frame()const{return applied_frame_;}
     bool shifted()const{return shifted_;}
-    void before_animation(Api& api){model_.before_animation(api);}
-    V3 offset()const{return sub(applied_,baseline_);}
-    V3 undo_ray_origin(V3 origin)const{
-        const float from_applied=length(sub(origin,applied_));
-        return shifted_&&from_applied<.1f&&from_applied<length(sub(origin,baseline_))?sub(origin,offset()):origin;
+    bool body_visible()const{return body_view_;}
+    bool selected(Api& api,void* camera)const{return reinterpret_cast<uintptr_t>(api.objects->native(camera))==camera_native_;}
+    void replace_body(Api& api,bool enabled){
+        replacement_=enabled;
+        if(!body_view_||!api.loaded)return;
+        uint32_t layers=0;
+        for(auto& r:renderers_)if(!r.fp)if(void* p=api.objects->live_native(r.id,r.native)){
+            r.avatar_hidden=replacement_&&!r.weapon;
+            if(api.enabled(p)==r.avatar_hidden)api.set_enabled(p,!r.avatar_hidden);
+            if(!r.avatar_hidden&&r.layer>=0&&r.layer<32)layers|=uint32_t(1)<<r.layer;
+        }
+        if(void* camera=api.objects->live_native(camera_,camera_native_)){
+            const int current=api.mask(camera);if(!mask_owned_||current!=applied_mask_)original_mask_=current;
+            applied_mask_=int((uint32_t(original_mask_)&~(uint32_t(1)<<8))|layers|(replacement_?1u:0u));
+            if(current!=applied_mask_)api.set_mask(camera,applied_mask_);mask_owned_=true;
+        }
     }
+    void before_cull(Api& api,void* managed_camera){
+        if(!api.loaded||!body_view_||!shifted_||reinterpret_cast<uintptr_t>(api.objects->native(managed_camera))!=camera_native_)return;
+        model_.show(api,true);
+        for(auto& r:renderers_)if(void* p=api.objects->live_native(r.id,r.native)){
+            r.avatar_hidden=!r.fp&&replacement_&&!r.weapon;
+            const bool visible=!r.fp&&!r.avatar_hidden;
+            if(api.enabled(p)!=visible)api.set_enabled(p,visible);
+            if(r.fp)continue;
+            // Unity's ShadowsOnly is 3; 2 is TwoSided. Apply to equipment too.
+            if(api.shadows(p)==3)api.set_shadows(p,1);
+            if(r.primary&&api.objects->force_off_offset>=0&&api.objects->field<uint8_t>(p,size_t(api.objects->force_off_offset)))api.objects->set_force_off(p,false);
+            if(api.objects->occlusion&&api.objects->occlusion(p))api.objects->set_occlusion(p,false);
+            if(api.render_layers&&api.set_render_layers){
+                const uint32_t current=api.render_layers(p);
+                if(!r.layers_owned||current!=r.applied_layers)r.render_layers=current;
+                r.applied_layers=(current&~reserved_layers_)|1u;
+                if(current!=r.applied_layers)api.set_render_layers(p,r.applied_layers);
+                r.layers_owned=true;
+            }
+        }
+    }
+    void before_animation(Api&){ }
+    V3 offset()const{return sub(applied_,baseline_);}
+    V3 undo_ray_origin(V3 origin)const{const float d=length(sub(origin,applied_));return shifted_&&d<.1f&&d<length(sub(origin,baseline_))?sub(origin,offset()):origin;}
     void begin_frame(Api& api,int frame){
         if(!shifted_||frame==applied_frame_||!api.loaded)return;
-        void* transform=api.objects->live(transform_);
-        if(reinterpret_cast<uintptr_t>(transform)==transform_native_){
-            V3 current{};api.position(transform,&current);
-            if(finite(current)&&length(sub(current,applied_))<.003f)api.set_position(transform,&baseline_);
+        if(void* p=api.objects->live_native(transform_,transform_native_)){
+            V3 current{};api.position(p,&current);if(finite(current)&&length(sub(current,applied_))<.003f)api.set_position(p,&baseline_);
         }
+        if(void* camera=api.objects->live_native(camera_,camera_native_)){
+            Matrix current{};
+            if(view_owned_&&api.view&&api.set_view){api.view(camera,&current);if(near(current,applied_view_))api.set_view(camera,&original_view_);}
+            if(cull_owned_&&api.cull_matrix&&api.set_cull_matrix){api.cull_matrix(camera,&current);if(near(current,applied_cull_))api.set_cull_matrix(camera,&original_cull_);}
+        }
+        view_owned_=cull_owned_=false;
         shifted_=false;
     }
     void reset(Api& api){
         if(api.loaded){
             begin_frame(api,applied_frame_-1);
-            void* camera=api.objects->live(camera_);
-            if(mask_owned_&&reinterpret_cast<uintptr_t>(camera)==camera_native_&&api.mask(camera)==applied_mask_)api.set_mask(camera,original_mask_);
-            if(camera_occlusion_owned_&&reinterpret_cast<uintptr_t>(camera)==camera_native_&&api.camera_occlusion&&!api.camera_occlusion(camera))api.set_camera_occlusion(camera,camera_occlusion_original_);
-            for(auto& renderer:renderers_)restore_renderer(api,renderer);
-            model_.reset(api);
+            if(void* p=api.objects->live_native(camera_,camera_native_))if(mask_owned_&&api.mask(p)==applied_mask_)api.set_mask(p,original_mask_);
+            for(auto& r:renderers_){restore_renderer(api,r);if(api.objects->release)api.objects->release(r.id,r.native);}model_.reset(api);
+            restore_pass(api);
+            if(api.objects->release){api.objects->release(camera_,camera_native_);api.objects->release(transform_,transform_native_);}
         }
-        renderers_.clear();queue_.clear();visited_.clear();camera_=transform_=0;
-        camera_native_=transform_native_=owner_=fp_=weapon_=animator_=0;shifted_=mask_owned_=false;next_scan_=0;status=0;body_meshes=0;
-        report_ready_=false;next_report_=0;fp_root_known_=false;camera_occlusion_owned_=false;invisible_since_=-1;
-        supplied_animator_=fallback_animator_native_=0;fallback_animator_=0;
+        renderers_.clear();camera_=transform_=0;camera_native_=transform_native_=owner_=fp_=weapon_=animator_=0;
+        shifted_=mask_owned_=body_view_=view_owned_=cull_owned_=false;next_refresh_=next_flags_=0;status=0;body_meshes=0;
+        reserved_layers_=0;model_info_=nullptr;weapon_visual_=0;replacement_=false;
     }
-    void update(Api& api,void* managed_camera,void* owner,void* fp,void* weapon,bool enabled,float distance,int frame,double time,void* managed_animator=nullptr){
+    void update(Api& api,void* managed_camera,void* owner,void* fp,void* weapon,bool enabled,float distance,int frame,double time,void* managed_animator=nullptr,void* model_info=nullptr,void* render_controller=nullptr,uint32_t reserved_layers=0,bool local_model=false,uintptr_t weapon_visual=0){
         if(!enabled||!api.loaded||!managed_camera||!owner){reset(api);return;}
         if(!std::isfinite(distance)){reset(api);status=-2;return;}
-        auto& objects=*api.objects;
-        const int32_t camera_id=objects.id(managed_camera);
-        void* camera=objects.native(managed_camera);
-        if(!camera_id||!camera){reset(api);status=-1;return;}
-        void* managed_transform=objects.decode(objects.transform(camera));
-        void* transform=objects.native(managed_transform);
-        const int32_t transform_id=objects.id(managed_transform);
-        if(!camera_id||!transform||!transform_id){reset(api);status=-1;return;}
-        if(camera_!=camera_id||owner_!=reinterpret_cast<uintptr_t>(owner))reset(api);
-        const uintptr_t supplied=reinterpret_cast<uintptr_t>(objects.native(managed_animator));
-        if(supplied!=supplied_animator_){supplied_animator_=supplied;fallback_animator_=0;fallback_animator_native_=0;}
-        if(fallback_animator_){
-            if(reinterpret_cast<uintptr_t>(objects.live(fallback_animator_))==fallback_animator_native_)managed_animator=objects.find(fallback_animator_);
-            else{fallback_animator_=0;fallback_animator_native_=0;}
+        auto& o=*api.objects;void* camera=o.native(managed_camera);void* animator=o.native(managed_animator);
+        if(!animator||!model_info){reset(api);status=-3;return;}
+        if(camera_native_!=reinterpret_cast<uintptr_t>(camera)||owner_!=reinterpret_cast<uintptr_t>(owner)){
+            reset(api);camera_=o.id(managed_camera);camera_native_=reinterpret_cast<uintptr_t>(camera);owner_=reinterpret_cast<uintptr_t>(owner);
+            void* t=o.decode(o.transform(camera));transform_=o.id(t);transform_native_=reinterpret_cast<uintptr_t>(o.native(t));
+            if(!camera_||!transform_){reset(api);status=-1;return;}
+            if(o.retain){o.retain(camera_,camera_native_);o.retain(transform_,transform_native_);}
+            original_mask_=api.mask(camera);applied_mask_=original_mask_;
         }
-        begin_frame(api,frame);
-        camera_=camera_id;camera_native_=reinterpret_cast<uintptr_t>(camera);transform_=transform_id;
-        transform_native_=reinterpret_cast<uintptr_t>(transform);owner_=reinterpret_cast<uintptr_t>(owner);
-        if(shifted_&&applied_frame_==frame)return;
-        void* animator=objects.native(managed_animator);
-        if(fp_!=reinterpret_cast<uintptr_t>(fp)||weapon_!=reinterpret_cast<uintptr_t>(weapon)||animator_!=reinterpret_cast<uintptr_t>(animator)){
-            for(auto& r:renderers_)restore_renderer(api,r);renderers_.clear();queue_.clear();visited_.clear();next_scan_=0;
-            fp_=reinterpret_cast<uintptr_t>(fp);weapon_=reinterpret_cast<uintptr_t>(weapon);
-            animator_=reinterpret_cast<uintptr_t>(animator);
+        begin_frame(api,frame);if(shifted_&&applied_frame_==frame)return;
+        if(animator_!=reinterpret_cast<uintptr_t>(animator)||fp_!=reinterpret_cast<uintptr_t>(fp)||weapon_!=reinterpret_cast<uintptr_t>(weapon)||model_info_!=model_info||weapon_visual_!=weapon_visual){
+            for(auto& r:renderers_){restore_renderer(api,r);if(o.release)o.release(r.id,r.native);}renderers_.clear();next_refresh_=next_flags_=0;
+            animator_=reinterpret_cast<uintptr_t>(animator);fp_=reinterpret_cast<uintptr_t>(fp);weapon_=reinterpret_cast<uintptr_t>(weapon);
+            model_info_=model_info;
+            weapon_visual_=weapon_visual;
         }
-        V3 position{};Quaternion q{};api.position(transform,&position);api.rotation(transform,&q);
+        reserved_layers_=reserved_layers;
+        void* transform=o.live_native(transform_,transform_native_);if(!transform){reset(api);status=-1;return;}
+        V3 eye{};Quaternion q{};api.position(transform,&eye);api.rotation(transform,&q);
         const float norm=q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w;
-        if(!finite(position)||!std::isfinite(norm)||norm<.5f||norm>1.5f){reset(api);status=-2;return;}
+        if(!finite(eye)||!std::isfinite(norm)||norm<.5f||norm>1.5f){reset(api);status=-2;return;}
         const float inv=1.f/std::sqrt(norm);q={q.x*inv,q.y*inv,q.z*inv,q.w*inv};
-        const V3 forward=rotate(q,{0,0,1}),right=rotate(q,{1,0,0}),up=rotate(q,{0,1,0});
-        V3 delta=add(scale(forward,-std::clamp(distance,.8f,5.f)),add(scale(right,.3f),scale(up,.15f)));
+        const V3 delta=add(scale(rotate(q,{0,0,1}),-std::clamp(distance,.8f,5.f)),add(scale(rotate(q,{1,0,0}),.3f),scale(rotate(q,{0,1,0}),.15f)));
         const float wanted=length(delta);const V3 direction=scale(delta,1.f/wanted);
-        float allowed=api.collision?api.collision(api.collision_context,position,direction,wanted):wanted;
-        if(!std::isfinite(allowed))allowed=0;
-        const float travel=std::clamp(allowed,0.f,wanted);
-        baseline_=position;applied_=add(position,scale(direction,travel));
-        api.set_position(transform,&applied_);shifted_=true;applied_frame_=frame;
-        // Measure, then drop any custom culling matrix: cull with the frustum of the pose we render from.
-        if(api.culling_matrix&&api.view_matrix&&api.projection_matrix&&time>=next_report_){
-            float c[16]{},v[16]{},pr[16]{};api.culling_matrix(camera,c);api.view_matrix(camera,v);api.projection_matrix(camera,pr);
-            float worst=0;
-            for(int col=0;col<4;++col)for(int row=0;row<4;++row){
-                float sum=0;for(int k=0;k<4;++k)sum+=pr[k*4+row]*v[col*4+k];
-                worst=std::max(worst,std::fabs(sum-c[col*4+row]));
-            }
-            cull_diff_=worst;
+        float allowed=api.collision?api.collision(api.collision_context,eye,direction,wanted):wanted;
+        if(!std::isfinite(allowed))allowed=0;const float travel=std::clamp(allowed,0.f,wanted);const bool body_view=travel>.65f;
+        // OnDisable restores temporary origin shifts. Read the eye again after
+        // switching; do not toggle the pass twice per frame next to a wall.
+        update_pass(api,render_controller,body_view);
+        api.position(transform,&eye);if(!finite(eye)){reset(api);status=-2;return;}
+        model_.update(api,managed_animator,model_info,body_view,time,local_model);
+        for(auto r:model_.primary())if(o.live_native(r.id,r.native))add_renderer(api,r.id,false,true);
+        if(time>=next_refresh_){
+            collect(api,animator,false);
+            // Query the separate view-model / weapon branches only. Never walk
+            // every child of the player and enable every LOD.
+            void* owner_t=o.native_return(o.transform(owner));void* fp_t=fp?o.native_return(o.transform(fp)):nullptr;
+            if(fp&&fp_t!=owner_t)collect(api,fp,true);
+            collect(api,owner,true,true);
+            if(weapon)collect(api,weapon,true);
+            next_refresh_=time+2;
         }
-        if(api.reset_culling){api.reset_culling(camera);++culling_resets_;}
-        // Show the body whenever the camera has really left the head; a wall
-        // directly behind the player keeps the first-person view.
-        const bool body_view=travel>.5f;
-        fp_root_known_=fp!=nullptr;
-        model_.update(api,managed_animator,body_view,time);
-        for(auto r:model_.primary())if(reinterpret_cast<uintptr_t>(objects.live(r.id))==r.native)add_renderer(api,r.id,false,true);
-        discover(api,owner,fp,weapon,animator,time);body_meshes=0;
-        uint32_t layers=0;bool body_on_fp_layer=false;unsigned drawn=0;
-        for(auto it=renderers_.begin();it!=renderers_.end();){
-            void* p=objects.live(it->id);
-            if(reinterpret_cast<uintptr_t>(p)!=it->native){it=renderers_.erase(it);continue;}
-            void* go=reinterpret_cast<void*>(it->go);
-            if(!body_view||!api.active(go)){restore_renderer(api,*it);++it;continue;}
-            const bool visible=!it->fp;
-            if(api.enabled(p)!=visible)api.set_enabled(p,visible);
-            if(visible){
-                if(objects.force_off_offset>=0&&objects.field<uint8_t>(p,size_t(objects.force_off_offset)))objects.set_force_off(p,false);
-                if(api.shadows(p)==3)api.set_shadows(p,1); // ShadowCastingMode: 0 Off, 1 On, 2 TwoSided, 3 ShadowsOnly
-                if(it->skinned&&!api.offscreen(p))api.set_offscreen(p,true);
-                // The device log showed exactly the renderers with dynamic occlusion
-                // enabled (isVisible=0) being culled once the camera left the head, while
-                // the ones without it stayed visible: baked occlusion data hides the body
-                // from the shifted camera position.
-                if(objects.occlusion&&objects.set_occlusion&&objects.occlusion(p)){objects.set_occlusion(p,false);it->occlusion_owned=true;}
-                if(api.rendering_layer&&api.set_rendering_layer){
-                    const uint32_t current_layer=api.rendering_layer(p);
-                    if(current_layer!=kBodyRenderingLayer){if(!it->rlm_owned){it->rlm=current_layer;it->rlm_owned=true;}api.set_rendering_layer(p,kBodyRenderingLayer);}
+        if(body_view!=body_view_||time>=next_flags_){
+            body_meshes=0;uint32_t layers=0;
+            for(auto it=renderers_.begin();it!=renderers_.end();){
+                void* p=o.live_native(it->id,it->native);if(!p){if(o.release)o.release(it->id,it->native);it=renderers_.erase(it);continue;}
+                if(!body_view){restore_renderer(api,*it);++it;continue;}
+                it->avatar_hidden=!it->fp&&replacement_&&!it->weapon;
+                const bool visible=!it->fp&&!it->avatar_hidden;
+                if(api.enabled(p)!=visible)api.set_enabled(p,visible);
+                if(visible){
+                    if(it->primary&&o.force_off_offset>=0&&o.field<uint8_t>(p,size_t(o.force_off_offset)))o.set_force_off(p,false);
+                    if(it->layer>=0&&it->layer<32)layers|=uint32_t(1)<<it->layer;++body_meshes;
                 }
-                if(api.is_visible&&api.is_visible(p))++drawn;
-                // The game may move the model between layers (hidden / shown);
-                // use the layer it has right now, not the one seen at discovery.
-                it->layer=api.layer(go);
-                if(it->layer>=0&&it->layer<32){layers|=uint32_t(1)<<it->layer;body_on_fp_layer|=it->layer==8;}
-                ++body_meshes;
+                ++it;
             }
-            ++it;
+            const int current=api.mask(camera);if(!mask_owned_||current!=applied_mask_)original_mask_=current;
+            applied_mask_=body_view?int((uint32_t(original_mask_)&~(uint32_t(1)<<8))|layers|(replacement_?1u:0u)):original_mask_;
+            if(current!=applied_mask_)api.set_mask(camera,applied_mask_);mask_owned_=true;body_view_=body_view;next_flags_=time+.2;
         }
-        // Per-renderer occlusion is off but the engine still culls every body mesh:
-        // fall back to switching occlusion culling off on the camera while this lasts.
-        if(api.is_visible&&body_view&&body_meshes){
-            if(drawn)invisible_since_=-1;
-            else if(invisible_since_<0)invisible_since_=time;
-            // Device log: the body stayed unseen with this off as well, so it is not the cause; kept disabled.
-            else if(kCameraOcclusionFallback&&time-invisible_since_>1.5&&!camera_occlusion_owned_&&api.camera_occlusion&&api.set_camera_occlusion){
-                camera_occlusion_original_=api.camera_occlusion(camera);
-                if(camera_occlusion_original_){api.set_camera_occlusion(camera,false);camera_occlusion_owned_=true;}
-            }
+        baseline_=eye;applied_=add(eye,scale(direction,travel));
+        const bool use_view=travel>.01f&&api.view&&api.set_view&&api.view_auto_offset>=0&&o.field<uint8_t>(camera,size_t(api.view_auto_offset))==0;
+        const bool use_cull=travel>.01f&&api.cull_matrix&&api.set_cull_matrix&&api.cull_auto_offset>=0&&o.field<uint8_t>(camera,size_t(api.cull_auto_offset))==0;
+        if(use_view)api.view(camera,&original_view_);if(use_cull)api.cull_matrix(camera,&original_cull_);
+        api.set_position(transform,&applied_);
+        // A custom game view/culling matrix does not follow Transform.position.
+        // Adjust only matrices that failed to follow automatically; restore
+        // their exact prior values next frame, preserving external changes.
+        const V3 offset=sub(applied_,baseline_);Matrix current{};
+        if(use_view&&finite(original_view_)){
+            applied_view_=translate_view(original_view_,offset);api.view(camera,&current);
+            if(!near(current,applied_view_)){api.set_view(camera,&applied_view_);view_owned_=true;}
         }
-        const int current=api.mask(camera);
-        if(!mask_owned_||current!=applied_mask_)original_mask_=current;
-        // The first-person layer stays hidden unless the body itself lives on it.
-        const uint32_t hidden=body_on_fp_layer?0u:(uint32_t(1)<<8);
-        applied_mask_=int(body_view?(uint32_t(original_mask_)|layers)&~hidden:uint32_t(original_mask_));
-        if(current!=applied_mask_)api.set_mask(camera,applied_mask_);mask_owned_=true;status=1;
-        if(time>=next_report_){
-            next_report_=time+2.;
-            int used=std::snprintf(report_,sizeof(report_),
-                "TP travel=%.2f wanted=%.2f body_view=%d renderers=%zu body_meshes=%u primary=%zu fallback_animator=%d fp_root=%d mask=%08x->%08x cam_occlusion_off=%d drawn=%u cull_matrix_diff=%.4f head=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f) |",
-                travel,wanted,body_view,renderers_.size(),body_meshes,model_.primary().size(),fallback_animator_!=0,fp_root_known_,
-                uint32_t(original_mask_),uint32_t(applied_mask_),int(camera_occlusion_owned_),drawn,cull_diff_,baseline_.x,baseline_.y,baseline_.z,applied_.x,applied_.y,applied_.z);
-            unsigned shown=0;
-            for(const auto& r:renderers_){
-                if(shown++>=8||used<0||size_t(used)>=sizeof(report_)-80)break;
-                void* p=objects.live(r.id);
-                const int enabled_now=p&&reinterpret_cast<uintptr_t>(p)==r.native?int(api.enabled(p)):-1;
-                const int hidden_now=p&&objects.force_off_offset>=0?int(objects.field<uint8_t>(p,size_t(objects.force_off_offset))):-1;
-                used+=std::snprintf(report_+used,sizeof(report_)-size_t(used)," [%d L%d %s en%d off%d sh%d]",
-                    r.id,r.layer,r.fp?"fp":"body",enabled_now,hidden_now,enabled_now>=0?api.shadows(p):-1);
-            }
-            // One line per renderer: is the engine culling it, where is it, how big, has it a mesh.
-            int d=0;detail_[0]=0;shown=0;
-            float cull[16]{};bool have_cull=false;
-            if(api.culling_matrix){api.culling_matrix(camera,cull);have_cull=true;}
-            d+=std::snprintf(detail_,sizeof(detail_),"TP camera near=%.3f far=%.1f fov=%.1f\n",api.near_clip?api.near_clip(camera):-1.f,api.far_clip?api.far_clip(camera):-1.f,api.field_of_view?api.field_of_view(camera):-1.f);
-            for(const auto& r:renderers_){
-                if(shown++>=8||d<0||size_t(d)>=sizeof(detail_)-200)break;
-                void* p=objects.live(r.id);
-                if(!p||reinterpret_cast<uintptr_t>(p)!=r.native)continue;
-                float b[6]{};V3 sc{};int vis=-1,mesh=-1;
-                if(api.is_visible)vis=api.is_visible(p)?1:0;
-                if(api.bounds)api.bounds(p,b);
-                if(api.lossy_scale){void* t=objects.native_return(api.game_transform(reinterpret_cast<void*>(r.go)));if(t)api.lossy_scale(t,&sc);}
-                if(r.skinned&&api.shared_mesh)mesh=api.shared_mesh(p)?1:0;
-                // Where the bounds centre lands in the culling frustum (inside: |x|,|y|<=w and 0<=z<=w).
-                float ndc[4]{0,0,0,0};
-                if(have_cull){
-                    const float x=b[0],y=b[1],z=b[2];
-                    for(int row=0;row<4;++row)ndc[row]=cull[0*4+row]*x+cull[1*4+row]*y+cull[2*4+row]*z+cull[3*4+row];
-                }
-                d+=std::snprintf(detail_+d,sizeof(detail_)-size_t(d),"TP clip x=%.2f y=%.2f z=%.2f w=%.2f\n",ndc[0],ndc[1],ndc[2],ndc[3]);
-                d+=std::snprintf(detail_+d,sizeof(detail_)-size_t(d),"TP renderer %d %s L%d visible=%d occlusion=%d rlm=%u(was %u) mesh=%d bounds=(%.1f,%.1f,%.1f)+-(%.2f,%.2f,%.2f) scale=(%.2f,%.2f,%.2f)\n",
-                    r.id,r.fp?"fp":"body",r.layer,vis,objects.occlusion?int(objects.occlusion(p)):-1,api.rendering_layer?api.rendering_layer(p):0u,r.rlm_owned?r.rlm:(api.rendering_layer?api.rendering_layer(p):0u),mesh,b[0],b[1],b[2],b[3],b[4],b[5],sc.x,sc.y,sc.z);
-            }
-            report_ready_=true;
+        if(use_cull&&finite(original_cull_)){
+            applied_cull_=translate_view(original_cull_,offset);api.cull_matrix(camera,&current);
+            if(!near(current,applied_cull_)){api.set_cull_matrix(camera,&applied_cull_);cull_owned_=true;}
         }
+        shifted_=true;applied_frame_=frame;status=1;
+        before_cull(api,managed_camera);
     }
-    // One diagnostic line every few seconds while the camera is active.
-    const char* take_report(){if(!report_ready_)return nullptr;report_ready_=false;return report_;}
-    const char* detail()const{return detail_;}
-    // Natives of what the game must not hide while the body is shown:
-    // renderers (kind 0) and GameObjects (kind 1).
-    template<class F>void each_guarded(Api& api,F f){
-        for(const auto& r:renderers_)if(!r.fp){f(0,reinterpret_cast<void*>(r.native));f(1,reinterpret_cast<void*>(r.go));}
-        model_.each_object(api,[&](void* go){f(1,go);});
-    }
-    uintptr_t camera_native()const{return camera_native_;}
 };
 } // namespace mango_camera

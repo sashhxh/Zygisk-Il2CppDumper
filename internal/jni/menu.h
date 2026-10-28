@@ -1,3 +1,4 @@
+#include "avatar_status.h"
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -175,7 +176,7 @@ inline ImRect PlayersBar(State& state,int players){
     }
     return rect;
 }
-template<class Settings> Result Draw(Settings& cfg,State& state,int w,int h,int players=-1,int chams_state=0,unsigned chams_meshes=0,int camera_state=0,unsigned body_meshes=0){
+template<class Settings> Result Draw(Settings& cfg,State& state,int w,int h,int players=-1,int chams_state=0,unsigned chams_meshes=0,int camera_state=0,unsigned body_meshes=0,int shader_stage=0,float chams_cpu=0,float camera_cpu=0,int model_state=0){
     Result result;const ImRect bar=PlayersBar(state,players);
     result.bar_min=bar.Min;result.bar_max=bar.Max;result.open=state.open;
     if(!state.open)return result;
@@ -258,7 +259,9 @@ template<class Settings> Result Draw(Settings& cfg,State& state,int w,int h,int 
                     toggle("No Recoil",cfg.no_recoil);toggle("No Spread",cfg.no_spread);
                     toggle("No Weapon Motion",cfg.no_weapon_motion);
                     toggle("Third Person",cfg.third_person);
-                    toggle("Solid Body (TP)",cfg.tp_solid);
+                    const bool previous_model=cfg.custom_model;
+                    toggle("Custom Model",cfg.custom_model);
+                    if(cfg.custom_model&&!previous_model)cfg.third_person=true;
                 }else{
                     Section("Misc",innerPad,s);
                     ImGui::PushItemWidth(colW-innerPad*2);
@@ -283,15 +286,17 @@ template<class Settings> Result Draw(Settings& cfg,State& state,int w,int h,int 
                     Label("Range",rPad);result.changed|=ImGui::SliderFloat("##esp_range",&cfg.range,25,1000,"%.0f m");
                     ImGui::Spacing();ImGui::SetCursorPosX(rPad);ImGui::TextDisabled("Occluded: red");
                     ImGui::SetCursorPosX(rPad);ImGui::TextDisabled("Unknown: gray");
-                    Label("Chams Opacity",rPad);result.changed|=ImGui::SliderFloat("##chams_alpha",&cfg.chams_alpha,.05f,1.f,"%.2f");
+                    Label("Chams Opacity",rPad);result.changed|=ImGui::SliderFloat("##chams_alpha",&cfg.chams_alpha,.05f,.65f,"%.2f");
                     Label("Chams Range",rPad);result.changed|=ImGui::SliderFloat("##chams_range",&cfg.chams_range,15,150,"%.0f m");
                     Label("Chams Models",rPad);result.changed|=ImGui::SliderInt("##chams_limit",&cfg.chams_limit,4,32);
                     if(cfg.chams){
                         ImGui::SetCursorPosX(rPad);
                         if(chams_state==-1)ImGui::TextDisabled("Chams: binding unavailable");
-                        else if(chams_state==-2)ImGui::TextDisabled("Chams: shader unavailable");
+                        else if(chams_state==-2)ImGui::TextDisabled("Shader failed: %d",shader_stage);
+                        else if(chams_state==2)ImGui::TextDisabled("Shader loading: %d",shader_stage);
                         else ImGui::TextDisabled("Chams meshes: %u",chams_meshes);
                         ImGui::SetCursorPosX(rPad);ImGui::TextDisabled("Through walls / armor");
+                        ImGui::SetCursorPosX(rPad);ImGui::TextDisabled("Chams CPU: %.2f ms",chams_cpu);
                     }
                 }else if(state.active_tab==1){
                     Label("Target Point",rPad);
@@ -301,8 +306,10 @@ template<class Settings> Result Draw(Settings& cfg,State& state,int w,int h,int 
                 }else if(state.active_tab==2){
                     Label("Camera Distance",rPad);result.changed|=ImGui::SliderFloat("##camera_distance",&cfg.camera_distance,.8f,5.f,"%.1f m");
                     if(cfg.third_person){
-                        ImGui::SetCursorPosX(rPad);ImGui::TextDisabled("Camera: %s",camera_state==1?"active":camera_state<0?"unavailable":"waiting");
+                        ImGui::SetCursorPosX(rPad);ImGui::TextDisabled("Camera: %s",camera_state==1?"active":camera_state==-3?"full body missing":camera_state<0?"unavailable":"waiting");
                         ImGui::SetCursorPosX(rPad);ImGui::TextDisabled("Body meshes: %u",body_meshes);
+                        ImGui::SetCursorPosX(rPad);ImGui::TextDisabled("Camera CPU: %.2f ms",camera_cpu);
+                        if(cfg.custom_model){ImGui::SetCursorPosX(rPad);ImGui::TextWrapped("Model: %s",mango_avatar::status_text(model_state));if(model_state<0){ImGui::SetCursorPosX(rPad);ImGui::TextDisabled("Code: %d",model_state);}}
                     }
                 }else if(state.active_tab==3){
                     Label("Color",rPad);result.changed|=ImGui::ColorEdit3("##esp_color",cfg.color,ImGuiColorEditFlags_NoInputs);

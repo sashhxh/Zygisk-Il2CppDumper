@@ -17,6 +17,12 @@ int main(){
     code[16]^=1;assert(mango_unity::force_rendering_offset(start,read_code)==-1);code[16]^=1;
     code[2]=0x17ffffff;assert(mango_unity::force_rendering_offset(start,read_code)==-1);
     assert(mango_unity::force_rendering_offset(start+10000,read_code)==-1);
+    code.fill(0);code[0]=0x14000010;
+    const uint32_t view[]={0xad410021,0xad400c22,0x3914081f,0xad048001,0xad038c02,0xd65f03c0};
+    std::memcpy(code.data()+16,view,sizeof(view));assert(mango_unity::camera_matrix_auto_offset(start,read_code)==0x502);
+    const uint32_t cull[]={0xad410021,0x910bf008,0xad400c22,0x3914441f,0xad010101,0xad000d02,0xd65f03c0};
+    std::memcpy(code.data()+16,cull,sizeof(cull));assert(mango_unity::camera_matrix_auto_offset(start,read_code)==0x511);
+    code[19]^=1;assert(mango_unity::camera_matrix_auto_offset(start,read_code)==-1);
     // Live Class fields may be absent, inherited, or corrupt. Invalid
     // offsets / owners must not become an unchecked Unity API argument.
     std::array<unsigned char,0x130> klass{},parent{};

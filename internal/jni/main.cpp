@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <link.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <pthread.h>
 #include <sys/prctl.h>
 #include <algorithm>
@@ -18,9 +19,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cstdarg>
-#include <csignal>
-#include <ucontext.h>
 #include <exception>
 #include <mutex>
 #include <thread>
@@ -37,48 +35,28 @@
 #include "unity_return.h"
 #include "chams.h"
 #include "third_person.h"
+#include "local_view_setup.h"
+#include "local_weapon_view.h"
+#include "weapon_grip.h"
+#include "two_hand_pose.h"
+#include "custom_avatar.h"
+#include "avatar_storage.h"
+#include "avatar_status.h"
+#include "prefab_asset.h"
 #include "unity_fields.h"
+#include "graphics_metadata.h"
+#include "shader_asset.h"
+#include "chams_shader_bundle.h"
+#include "graphics_roots.h"
+#include "file_log.h"
+extern "C" void mango_file_log(const char* tag,const char* line){mango_log::write_file(tag,line);}
 extern "C" int oxide_bypass_install(uint32_t);
 extern "C" int oxide_bypass_tick();
-// Every line goes to logcat and to a text file the user can read without adb:
-//   /data/user/<n>/<package>/files/mango_log.txt   (root)
-//   /sdcard/Android/data/<package>/files/mango_log.txt
-namespace {
-std::mutex file_log_mutex;
-FILE* file_log_handles[2]={nullptr,nullptr};
-double file_log_retry=0;
-void file_log_paths(char (&a)[256],char (&b)[256]){
-    const unsigned user=unsigned(getuid())/100000;
-    std::snprintf(a,sizeof(a),"/data/user/%u/com.catsbit.oxidesurvivalisland/files/mango_log.txt",user);
-    std::snprintf(b,sizeof(b),"/storage/emulated/%u/Android/data/com.catsbit.oxidesurvivalisland/files/mango_log.txt",user);
-}
-}
-extern "C" void mango_file_log(const char* tag,const char* line){
-    std::lock_guard<std::mutex> lock(file_log_mutex);
-    const double t=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if(t>=file_log_retry&&(!file_log_handles[0]||!file_log_handles[1])){
-        file_log_retry=t+5;char a[256],b[256],old[272];file_log_paths(a,b);
-        // The previous run's log (it may hold the crash) is kept as *.prev.
-        if(!file_log_handles[0]){std::snprintf(old,sizeof(old),"%s.prev",a);std::rename(a,old);file_log_handles[0]=std::fopen(a,"w");}
-        if(!file_log_handles[1]){std::snprintf(old,sizeof(old),"%s.prev",b);std::rename(b,old);file_log_handles[1]=std::fopen(b,"w");}
-    }
-    for(int i=0;i<2;++i){
-        FILE* f=file_log_handles[i];
-        if(!f)continue;
-        std::fprintf(f,"%.3f [%s] %s\n",t,tag,line);std::fflush(f);
-        if(std::ftell(f)>3*1024*1024){char a[256],b[256];file_log_paths(a,b);std::fclose(f);file_log_handles[i]=std::fopen(i?b:a,"w");}
-    }
-}
-static void mango_log(const char* format,...) __attribute__((format(printf,1,2)));
-static void mango_log(const char* format,...){
-    char line[1024];va_list args;va_start(args,format);std::vsnprintf(line,sizeof(line),format,args);va_end(args);
-    __android_log_write(ANDROID_LOG_INFO,"MANGOcheat",line);mango_file_log("MANGOcheat",line);
-}
-#define LOG(...) mango_log(__VA_ARGS__)
+#define LOG(...) mango_log::log("MANGOcheat",__VA_ARGS__)
 namespace mango {
 constexpr const char* package="com.catsbit.oxidesurvivalisland";
 // Identifies the loaded library in the startup log.
-const char revision_marker[]="MANGOCHEAT_REV=r12j-wrapper-guard";
+const char revision_marker[]="MANGOCHEAT_REV=r18-avatar-activation-recovery";
 constexpr size_t max_players=256, bone_count=17;
 struct V2{float x=0,y=0;};
 struct V3{float x=0,y=0,z=0;};
@@ -89,8 +67,6 @@ static_assert(sizeof(RaycastHit)==44&&offsetof(RaycastHit,distance)==0x1c&&offse
               "Unity 6000.3 RaycastHit ABI verified at D57E24C / D57E1A0");
 struct Method;struct Field;using Obj=void;using Class=void;using Type=void;
 double now(){return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
-// gettid is a real syscall; the Unity-thread checks below run for every player every frame.
-pid_t current_tid(){static thread_local const pid_t tid=pid_t(syscall(SYS_gettid));return tid;}
 bool finite(V3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);}
 float distance(V3 a,V3 b){return std::sqrt((a.x-b.x)*(a.x-b.x)+(a.y-b.y)*(a.y-b.y)+(a.z-b.z)*(a.z-b.z));}
 struct Config{
@@ -100,20 +76,21 @@ struct Config{
     bool magic_team_filter=true;int magic_point=0; // 0 head, 1 body
     bool no_recoil=false,no_spread=false,no_weapon_motion=false;
     bool visibility_check=true,visible_only=false;
-    bool chams=false;float chams_alpha=.6f,chams_range=80;int chams_limit=16;
-    bool third_person=false;float camera_distance=2.5f;
-    bool tp_solid=false; // paint the local body with the chams material (shows whether the game hides it with its own shader)
+    bool chams=false;float chams_alpha=.28f,chams_range=80;int chams_limit=16;
+    bool third_person=false;float camera_distance=2.5f;bool custom_model=false;
 }cfg;
 std::atomic<bool> want_esp{true},want_skeleton{false},game_ready{false};
 std::atomic<float> esp_range{300};
 std::atomic<bool> want_visibility{true};
 std::atomic<bool> want_chams{false};
-std::atomic<float> chams_alpha{.6f},chams_range{80};
+std::atomic<float> chams_alpha{.28f},chams_range{80};
 std::atomic<int> chams_limit{16},chams_status{0};
 std::atomic<int> chams_shader{0};
 std::atomic<unsigned> chams_renderers{0},chams_creations{0},chams_restore_errors{0};
-std::atomic<bool> want_tp_solid{false};std::atomic<bool> want_third_person{false};std::atomic<float> camera_distance{2.5f};
+std::atomic<bool> want_custom_model{false};std::atomic<int> custom_model_status{0};
+std::atomic<bool> want_third_person{false};std::atomic<float> camera_distance{2.5f};
 std::atomic<int> camera_status{0};std::atomic<unsigned> camera_meshes{0};
+std::atomic<int> shader_stage{0};std::atomic<float> chams_cpu_ms{0},camera_cpu_ms{0};
 std::atomic<uintptr_t> third_camera_transform{0};std::atomic<pid_t> unity_camera_thread{0};
 std::atomic<bool> want_no_recoil{false},want_no_spread{false},want_no_weapon_motion{false};
 std::atomic<bool> want_magic_bullet{false},want_magic_ads_only{false},want_magic_team_filter{true};
@@ -135,9 +112,6 @@ std::atomic<double> first_egl_frame_at{0};
 std::atomic<bool> model_ready{false};
 std::atomic<unsigned> capture_frames{0};
 std::atomic<unsigned> max_observe_us{0},max_publish_us{0};
-// Main-thread cost of the two features that used to drop the game to ~10 fps.
-std::atomic<unsigned> camera_us_max{0},chams_us_max{0},camera_samples{0},chams_samples{0};
-std::atomic<uint64_t> camera_us_total{0},chams_us_total{0};
 std::atomic<unsigned> max_render_us{0},capture_samples{0},render_samples{0};
 std::atomic<uint64_t> capture_total_us{0},render_total_us{0};
 std::atomic<int> input_backend{0}; // 1 legacy, 2 new Input System
@@ -219,7 +193,7 @@ struct Api{
             LOG("Waiting for verified Oxide 1.16.11978 ARM64 image; unsupported build is not patched");
             return false;
         }
-        base=resolver.base();raw=true;loaded=true;runtime_stage.store(2);
+        base=resolver.base();mango_log::module_base()=base;raw=true;loaded=true;runtime_stage.store(2);
         LOG("Offset runtime ready: %s bias=%lx GNU build ID verified, no metadata/scene scan",resolver.path(),static_cast<unsigned long>(base));
         return true;
     }
@@ -688,282 +662,243 @@ struct RawEngine {
 
 mango_chams::Api chams_api;
 mango_chams::Controller chams_controller;
-mango_chams::Controller tp_tint; // local body in third person, same materials as chams
+mango_graphics::Metadata graphics_metadata;
+mango_graphics::Roots graphics_roots;
+mango_graphics::ShaderAsset shader_asset;
+std::u16string shader_file_path;std::atomic<bool> shader_file_ready{false};
+void* shader_runtime_type=nullptr;
+void* safe_graphics_icall(const char* name){return raw_fn<void*(*)(const char*)>(0x5C8292C)(name);}
 bool raw_type_named(Obj*,const char*);
 void* raw_named_reference(void* object,const char* name){
-    Obj* value=reinterpret_cast<Obj*>(mango_unity::reference_field(reinterpret_cast<uintptr_t>(object),name,raw_read));
-    const char* expected=nullptr;
-    if(!std::strcmp(name,"body")||!std::strcmp(name,"headModel"))expected="Transform";
-    else if(!std::strcmp(name,"skinnedMeshRenderer")||!std::strcmp(name,"headRenderer"))expected="Renderer";
-    else if(!std::strcmp(name,"characterAnimation"))expected="MonoBehaviour";
+    if(!raw_type_named(object,"PlayerModelInfo"))return nullptr;
+    const char* expected=nullptr;size_t offset=0;
+    if(!std::strcmp(name,"body")){expected="Transform";offset=0x40;}
+    else if(!std::strcmp(name,"headModel")){expected="Transform";offset=0x48;}
+    else if(!std::strcmp(name,"skinnedMeshRenderer")){expected="Renderer";offset=0x50;}
+    else if(!std::strcmp(name,"headRenderer")){expected="Renderer";offset=0x58;}
+    else if(!std::strcmp(name,"characterAnimation")){expected="CharacterAnimation";offset=0x60;}
+    else if(!std::strcmp(name,"rightWeaponHolder")){expected="Transform";offset=0x28;}
+    else if(!std::strcmp(name,"leftWeaponHolder")){expected="Transform";offset=0x30;}
+    Obj* value=offset?raw_field<Obj*>(object,offset):nullptr;
     return expected&&raw_type_named(value,expected)&&raw_field<void*>(value,0x10)?value:nullptr;
 }
 void prepare_chams(){
     if(chams_api.loaded||(!want_chams.load()&&!want_third_person.load()))return;
-    // A failed bind is retried slowly; it used to retry (and log) every frame.
-    static double next_try=0;
-    if(now()<next_try)return;
-    next_try=now()+5;
+    static double retry=0;if(now()<retry)return;retry=now()+5;
     chams_api.decode=raw_decode_object;
     chams_api.find=[](int32_t id)->void*{return raw_fn<Obj*(*)(int32_t,const Method*)>(0xD4C4960)(id,nullptr);};
     chams_api.read=raw_read;
-    // Object/array/renderer pointers read through field() come straight from
-    // Unity in the same callback; dereference them instead of one syscall each.
-    chams_api.direct=true;chams_api.clock=now;
-    chams_api.log=[](const char* message){LOG("%s",message);};
     chams_api.named_ref=raw_named_reference;
+    chams_api.is_mesh=[](void* object){return raw_type_named(object,"SkinnedMeshRenderer")||raw_type_named(object,"MeshRenderer");};
     chams_api.store_ref=[](uintptr_t at,void* value){
         std::memcpy(reinterpret_cast<void*>(at),&value,sizeof(value));
         raw_fn<void(*)(uintptr_t)>(0x5C3793C)(at);
     };
-    chams_api.load(raw_fn<mango_chams::Api::Resolve>(mango_offsets::resolve_icall));
+    chams_api.xray_shader=[](){return shader_asset.id();};
+    chams_api.shader_state=[](){return shader_asset.status;};
+    chams_api.load(safe_graphics_icall);
+    if(chams_api.loaded){
+        graphics_roots.init([](const char* name){return api.resolver.get(name);},chams_api);
+        chams_api.retain=[](int32_t id,uintptr_t p){graphics_roots.retain(id,p);};chams_api.release=[](int32_t id,uintptr_t p){graphics_roots.release(id,p);};
+        chams_api.cached_native=[](int32_t id,uintptr_t p){return graphics_roots.live(id,p);};
+    }
     LOG("Chams object API: ready=%d native_id_offset=%d force_offset=%d",chams_api.loaded,chams_api.native_id_offset,chams_api.force_off_offset);
+}
+Obj* raw_body_info(Obj* player){
+    Obj* lease=raw_field<Obj*>(player,0x260);Obj* info=raw_field<Obj*>(lease,0x10);
+    return raw_type_named(info,"PlayerModelInfo")&&raw_field<void*>(info,0x10)?info:nullptr;
+}
+void prepare_graphics_types(Obj* model_info,double time){
+    if(!chams_api.loaded)return;
+    static double next=0;if(time<next)return;next=time+.25;
+    if(!graphics_metadata.methods){
+        graphics_metadata.load([](const char* name){return api.resolver.get(name);},raw_read);
+        graphics_metadata.executable=[](uintptr_t p){return api.resolver.executable(p);};
+    }
+    Obj* renderer=static_cast<Obj*>(raw_named_reference(model_info,"skinnedMeshRenderer"));
+    if(renderer&&!chams_api.renderer_type){
+        void* type=graphics_metadata.type_of(renderer);chams_api.renderer_type=type?graphics_metadata.base_type(type):nullptr;
+        if(!raw_type_named(chams_api.renderer_type,"RuntimeType"))chams_api.renderer_type=nullptr;
+        graphics_roots.type(0,chams_api.renderer_type);
+    }
+    if(!want_chams.load())return;
+    if(!shader_runtime_type){
+        void* source=nullptr;
+        if(renderer){void* mats=chams_api.materials(chams_api.native(renderer));if(chams_api.count(mats)>0){void* m=chams_api.native(chams_api.item(mats,0));if(m)source=chams_api.decode(chams_api.get_shader(m));}}
+        if(!source){auto name=mango_chams::span(u"Universal Render Pipeline/Unlit");source=chams_api.decode(chams_api.shader(&name));}
+        if(source)shader_runtime_type=graphics_metadata.type_of(source);
+        if(!raw_type_named(shader_runtime_type,"RuntimeType"))shader_runtime_type=nullptr;
+        graphics_roots.type(1,shader_runtime_type);
+    }
+    if(shader_file_ready.load(std::memory_order_acquire)&&shader_asset.bind(safe_graphics_icall)){
+        mango_chams::Span path{shader_file_path.data(),int32_t(shader_file_path.size())};
+        shader_asset.update(chams_api,path,shader_runtime_type,time);
+    }
+    shader_stage.store(!graphics_metadata.methods?-8:!chams_api.renderer_type?-9:!shader_runtime_type?-10:!shader_file_ready.load()?-11:shader_asset.status);
+    if(!graphics_metadata.methods||!chams_api.renderer_type||!shader_runtime_type)next=time+2;
+}
+void write_shader_file(){
+    char path[256];std::snprintf(path,sizeof(path),"/data/user/%u/%s/files/cfesp-unlit-r12.bundle",unsigned(getuid())/100000,package);
+    const int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0){LOG("Shader file creation failed: %d",errno);return;}
+    size_t at=0;while(at<kChamsShaderBundleSize){const ssize_t n=write(fd,kChamsShaderBundle+at,kChamsShaderBundleSize-at);if(n<=0)break;at+=size_t(n);}
+    const bool complete=close(fd)==0&&at==kChamsShaderBundleSize;
+    if(!complete){unlink(path);return;}
+    shader_file_path.clear();for(const unsigned char c:std::string(path))shader_file_path.push_back(char16_t(c));
+    shader_file_ready.store(true,std::memory_order_release);
 }
 
 mango_camera::Api camera_api;mango_camera::Controller camera_controller;
+mango_camera::ViewSetupApi view_setup_api;mango_camera::LocalViewSetup view_setup;
+mango_camera::WeaponViewApi weapon_view_api;mango_camera::LocalWeaponView local_weapon_view;
+mango_grip::Controller grip_controller;
+mango_avatar::Api avatar_api;mango_avatar::Controller avatar_controller;
+mango_graphics::PrefabAsset avatar_asset;
+mango_avatar::Storage avatar_storage,avatar_storage_files; // Unity cache dir, and the app files dir the shader bundle already loads from
+extern "C" const unsigned char cfesp_avatar_bundle[],cfesp_avatar_bundle_end[];
+void write_avatar_file(){
+    const size_t size=reinterpret_cast<uintptr_t>(cfesp_avatar_bundle_end)-reinterpret_cast<uintptr_t>(cfesp_avatar_bundle);
+    avatar_storage.flush(cfesp_avatar_bundle,size);avatar_storage_files.flush(cfesp_avatar_bundle,size);
+}
+std::string narrow(const std::u16string& text){std::string out;for(char16_t c:text)out.push_back(c<128?char(c):'?');return out;}
+// Unity prints why it refuses a bundle to logcat (tag Unity); the app may read its own log.
+void capture_unity_log(int stage){
+    static int captures=0;if(captures++>=4)return;
+    FILE* pipe=popen("/system/bin/logcat -d -t 800 -s Unity:V 2>&1","r");
+    if(!pipe){LOG("Unity log unavailable: %s",std::strerror(errno));return;}
+    char line[400];unsigned kept=0;
+    while(std::fgets(line,sizeof(line),pipe)&&kept<40){
+        if(!(std::strstr(line,"ssetBundle")||std::strstr(line,"ssetbundle")||std::strstr(line,"CAB-")||std::strstr(line,"cfesp")||std::strstr(line,"erializ")||std::strstr(line,"orrupt")||std::strstr(line,"annot")||std::strstr(line,"ailed")))continue;
+        size_t n=std::strlen(line);while(n&&(line[n-1]=='\n'||line[n-1]=='\r'))line[--n]=0;
+        LOG("Unity says (stage %d): %s",stage,line);++kept;
+    }
+    pclose(pipe);if(!kept)LOG("Unity log has no bundle messages (stage %d)",stage);
+}
+void log_avatar_files(){
+    static bool logged=false;if(logged)return;
+    const int a=avatar_storage.state.load(),b=avatar_storage_files.state.load();if(a<=2&&b<=2)return;logged=true;
+    for(const auto* storage:{&avatar_storage,&avatar_storage_files}){
+        if(storage->state.load()!=3){LOG("Avatar file state=%d",storage->state.load());continue;}
+        const std::string path=narrow(storage->path());struct stat info{};
+        const bool ok=::stat(path.c_str(),&info)==0;
+        LOG("Avatar file %s size=%lld expected=%zu readable=%d",path.c_str(),ok?(long long)info.st_size:-1LL,
+            size_t(reinterpret_cast<uintptr_t>(cfesp_avatar_bundle_end)-reinterpret_cast<uintptr_t>(cfesp_avatar_bundle)),access(path.c_str(),R_OK)==0);
+    }
+}
+void report_avatar(int stage){
+    custom_model_status.store(stage);
+    static int previous=-999,old_file=-999;
+    const int file=avatar_storage.state.load();
+    if(stage!=previous||file!=old_file){
+        previous=stage;old_file=file;
+        LOG("Avatar: stage=%d %s asset=%d attempt=%u file=%d human=%u target=%u meshes=%u active=%d",stage,mango_avatar::status_text(stage),avatar_asset.status,avatar_asset.attempts(),file,avatar_controller.human_count,avatar_controller.target_count,avatar_controller.mesh_count,avatar_controller.visible);
+        log_avatar_files();
+        if(stage<=-11&&stage>=-17)capture_unity_log(stage);
+    }
+}
+void prepare_avatar_file(double time){
+    static double retry=0;
+    if(avatar_storage.state.load()>0||time<retry)return;retry=time+5;
+    try{
+        Obj* path=raw_fn<Obj*(*)(const Method*)>(0xD42F9F8)(nullptr);
+        const int count=raw_field<int>(path,0x10);if(count<=0||count>400)return;
+        std::array<char16_t,401> text{};if(!raw_read(reinterpret_cast<uintptr_t>(path)+0x14,text.data(),size_t(count)*2))return;
+        std::string directory;for(int i=0;i<count;++i){if(!text[i]||text[i]>127)return;directory.push_back(char(text[i]));}
+        avatar_storage.request(directory);
+        char files[256];std::snprintf(files,sizeof(files),"/data/user/%u/com.catsbit.oxidesurvivalisland/files",unsigned(getuid())/100000);avatar_storage_files.request(files);
+    }catch(...){LOG("Avatar: cache path unavailable");}
+}
+void update_avatar(Obj* local,const mango_camera::PlayerView& view,double time){
+    static bool previously_enabled=false;
+    if(!want_custom_model.load()){
+        previously_enabled=false;avatar_asset.retry(time,true);avatar_controller.suspend(avatar_api);camera_controller.replace_body(camera_api,false);report_avatar(0);return;
+    }
+    const bool rising=!previously_enabled;previously_enabled=true;
+    auto fail=[&](int stage){avatar_controller.hide(avatar_api);camera_controller.replace_body(camera_api,false);report_avatar(stage);};
+    // The already displayed body is a usable source while the dedicated local
+    // view initializes. Switching to it later rebinds the visual automatically.
+    if(!view.info||!view.animator){fail(-1);return;}
+    if(!avatar_api.load(safe_graphics_icall,camera_api)){fail(-2);return;}
+    prepare_avatar_file(time);
+    const int cache_state=avatar_storage.state.load(std::memory_order_acquire),files_state=avatar_storage_files.state.load(std::memory_order_acquire);
+    // Prefer the files directory (the shader bundle loads from there); alternate on retries.
+    const bool use_files=files_state==3&&(cache_state!=3||(avatar_asset.attempts()%2)==0);
+    const auto& chosen=use_files?avatar_storage_files:avatar_storage;
+    if(chosen.state.load(std::memory_order_acquire)!=3){fail(cache_state<0&&files_state<0?-3:2);return;}
+    avatar_asset.retry(time,rising);
+    try{
+        if(avatar_asset.status>=0&&avatar_asset.status!=3&&avatar_asset.bind(safe_graphics_icall)){
+            Obj* object=chams_api.decode(chams_api.game_object(chams_api.native(view.animator)));
+            Obj* type=raw_type_named(object,"GameObject")?raw_fn<Obj*(*)(Obj*,const Method*)>(0xDB15300)(object,nullptr):nullptr;
+            if(!raw_type_named(type,"RuntimeType")){fail(-4);return;}
+            const auto& path=chosen.path();mango_chams::Span span{path.data(),int32_t(path.size())};
+            avatar_asset.update(chams_api,span,type,time);
+        }
+        if(avatar_asset.status<0){fail(avatar_asset.status-10);return;}
+        if(avatar_asset.status!=3){fail(avatar_asset.status==2?4:3);return;}
+        const bool visible=avatar_controller.update(avatar_api,view.animator,avatar_asset.id(),true,camera_controller.body_visible(),time);
+        camera_controller.replace_body(camera_api,visible);
+        const int pose=avatar_controller.status;
+        report_avatar(visible?6:!camera_controller.body_visible()?9:pose==4?7:pose==5?8:pose<0?pose-20:5);
+    }catch(...){fail(-25);}
+}
 using SphereCast=bool(*)(void*,mango_camera::V3*,float,mango_camera::V3*,float,RaycastHit*,int,int);
 SphereCast camera_sphere=nullptr;
-struct CameraCollision {Obj* local=nullptr;Obj* camera=nullptr;};CameraCollision camera_collision;
-// Layers from the game's TagManager that can actually block the camera:
-// 0 Default, 12 Construction, 14 Deployed, 15 Terrain, 19 Vehicle,
-// 24 LightingStatic, 27 VehicleBox. The player's own capsule (11), hitboxes
-// (10) and ragdoll bones (22) are excluded. The old ~(1<<2) mask hit those
-// colliders over and over while the camera backed away, used up its retries
-// and reported a wall right behind the player: the camera stayed at the head
-// and the body was hidden again.
-constexpr int camera_world_mask=(1<<0)|(1<<12)|(1<<14)|(1<<15)|(1<<19)|(1<<24)|(1<<27);
+struct CameraCollision {Obj* local=nullptr,*previous=nullptr;double at=-1;float distance=0,length=0;mango_camera::V3 origin{},direction{};};CameraCollision camera_collision;
 float camera_collision_distance(void* context,mango_camera::V3 origin,mango_camera::V3 direction,float max_distance){
     auto* ctx=static_cast<CameraCollision*>(context);
+    const double time=now();
+    if(ctx->local==ctx->previous&&time-ctx->at<.05&&mango_camera::length(mango_camera::sub(origin,ctx->origin))<.1f&&mango_camera::length(mango_camera::sub(direction,ctx->direction))<.1f&&std::fabs(max_distance-ctx->length)<.05f)return std::min(ctx->distance,max_distance);
+    struct Remember {CameraCollision* ctx;mango_camera::V3 origin,direction;float length;double time;float result=0;~Remember(){ctx->previous=ctx->local;ctx->origin=origin;ctx->direction=direction;ctx->length=length;ctx->at=time;ctx->distance=result;}} remember{ctx,origin,direction,max_distance,time};
     std::array<uint64_t,2> scene{};
-    // No physics scene means no information, not a wall.
-    if(!ctx->local||(!raw_engine.capture_scene(ctx->local,scene)&&!(ctx->camera&&raw_engine.capture_scene(ctx->camera,scene))))return max_distance;
+    if(!ctx->local||!raw_engine.capture_scene(ctx->local,scene))return 0;
     void* owner=raw_field<void*>(ctx->local,0x10);
     void* owner_transform=owner?raw_engine.unwrap_native(raw_engine.transform(owner)):nullptr;
     float traveled=0;
-    for(unsigned attempt=0;attempt<6;++attempt){
+    for(unsigned attempt=0;attempt<2;++attempt){
         RaycastHit hit{};const float remaining=max_distance-traveled;
-        if(remaining<=.05f)return max_distance;
+        if(remaining<=.05f)return remember.result=std::max(0.f,traveled-.15f);
         bool found=false;
-        if(camera_sphere)found=camera_sphere(scene.data(),&origin,.14f,&direction,remaining,&hit,camera_world_mask,1);
-        else{Ray ray{{origin.x,origin.y,origin.z},{direction.x,direction.y,direction.z}};found=raw_engine.raycast(scene.data(),&ray,remaining,&hit,camera_world_mask,1);}
-        if(!found)return max_distance;
-        if(!std::isfinite(hit.distance)||hit.distance<0||hit.distance>remaining+.05f)return std::max(0.f,traveled-.15f);
+        constexpr int mask=~((1<<2)|(1<<3)|(1<<8)|(1<<9)|(1<<10)|(1<<26));
+        if(camera_sphere)found=camera_sphere(scene.data(),&origin,.14f,&direction,remaining,&hit,mask,1);
+        else{Ray ray{{origin.x,origin.y,origin.z},{direction.x,direction.y,direction.z}};found=raw_engine.raycast(scene.data(),&ray,remaining,&hit,mask,1);}
+        if(!found)return remember.result=max_distance;
+        if(!std::isfinite(hit.distance)||hit.distance<0||hit.distance>remaining+.05f)return remember.result=std::max(0.f,traveled-.15f);
         void* collider=raw_engine.unwrap_native(raw_engine.collider(&hit.collider));
         void* transform=collider?raw_engine.unwrap_native(raw_engine.transform(collider)):nullptr;
         if(transform&&owner_transform&&(transform==owner_transform||raw_engine.is_child(transform,owner_transform))){
             const float advance=hit.distance+.3f;origin=mango_camera::add(origin,mango_camera::scale(direction,advance));traveled+=advance;continue;
         }
-        return std::max(0.f,traveled+hit.distance-.15f);
+        return remember.result=std::max(0.f,traveled+hit.distance-.15f);
     }
-    // Only our own colliders were hit; nothing in the world is in the way.
-    return max_distance;
-}
-using PositionGetter=V3(*)(Obj*,const Method*);PositionGetter original_camera_position=nullptr;
-V3 camera_position_hook(Obj* self,const Method* method){
-    const uintptr_t watched=third_camera_transform.load(std::memory_order_relaxed);
-    if(watched&&self){
-        uintptr_t native=0;std::memcpy(&native,static_cast<unsigned char*>(self)+0x10,sizeof(native));
-        if(native==watched&&current_tid()==unity_camera_thread.load()){
-            const int frame=raw_fn<int(*)(const Method*)>(0xD4B577C)(nullptr);
-            camera_controller.begin_frame(camera_api,frame);
-        }
-    }
-    return original_camera_position?original_camera_position(self,method):V3{};
-}
-// ---- body guard ------------------------------------------------------------
-// The device log shows the local body enabled, positioned, not occluded and still
-// never drawn. Something re-hides it between our callback and the camera cull (a
-// pre-cull / beginCameraRendering handler of the game is the usual way). These
-// hooks log who touches the body renderers and GameObjects while third person is
-// on (with caller offsets in libil2cpp) and refuse the calls that would hide them.
-thread_local int own_calls=0; // our own Unity calls pass through untouched
-struct OwnScope {OwnScope(){++own_calls;}~OwnScope(){--own_calls;}};
-struct GuardSet {
-    std::array<uintptr_t,96> renderers{},objects{};size_t renderer_count=0,object_count=0;bool active=false;
-}guard_set;
-std::atomic<unsigned> guard_blocked{0};
-bool guard_contains(const std::array<uintptr_t,96>& list,size_t count,void* self){
-    const uintptr_t value=reinterpret_cast<uintptr_t>(self);
-    for(size_t i=0;i<count;++i)if(list[i]==value)return true;
-    return false;
-}
-bool guarded(void* self,bool object){
-    if(!guard_set.active||own_calls||!self||current_tid()!=unity_camera_thread.load())return false;
-    return object?guard_contains(guard_set.objects,guard_set.object_count,self):guard_contains(guard_set.renderers,guard_set.renderer_count,self);
-}
-void guard_note(const char* what,long value,bool blocked){
-    static std::array<unsigned,16> counts{};static std::array<double,16> last{};
-    static std::vector<const char*> names;
-    size_t slot=0;for(;slot<names.size();++slot)if(names[slot]==what)break;
-    if(slot==names.size()){if(names.size()>=counts.size())return;names.push_back(what);}
-    const double time=now();
-    if(counts[slot]>=12&&time-last[slot]<3)return;
-    ++counts[slot];last[slot]=time;
-    uintptr_t callers[4]{};
-    uintptr_t frame=reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
-    callers[0]=reinterpret_cast<uintptr_t>(__builtin_return_address(0));
-    for(int i=1;i<4;++i){
-        uintptr_t next=0,ret=0;
-        if(!frame||(frame&7)||!raw_read(frame,&next,sizeof(next))||!raw_read(frame+8,&ret,sizeof(ret)))break;
-        callers[i]=ret;frame=next;
-    }
-    LOG("Guard: %s(%ld) %s callers=+0x%lx +0x%lx +0x%lx +0x%lx",what,value,blocked?"BLOCKED":"allowed",
-        static_cast<unsigned long>(callers[0]-api.base),static_cast<unsigned long>(callers[1]-api.base),
-        static_cast<unsigned long>(callers[2]-api.base),static_cast<unsigned long>(callers[3]-api.base));
-}
-using RendererBoolFn=void(*)(void*,bool);using RendererIntFn=void(*)(void*,int);
-using ObjectBoolFn=void(*)(void*,bool);using ObjectIntFn=void(*)(void*,int);
-using MaterialsFn=void(*)(void*,void*,int);using RendererMaskFn=void(*)(void*,uint32_t);
-RendererBoolFn orig_renderer_enabled=nullptr,orig_force_off=nullptr;
-RendererIntFn orig_shadow_mode=nullptr;MaterialsFn orig_materials=nullptr;
-RendererMaskFn orig_rendering_layer=nullptr;
-using CameraMatrixFn=void(*)(void*,void*);using CameraFn=void(*)(void*);
-CameraMatrixFn orig_set_culling_matrix=nullptr;CameraFn orig_reset_culling_matrix=nullptr;
-ObjectBoolFn orig_set_active=nullptr;ObjectIntFn orig_set_layer=nullptr,orig_camera_mask=nullptr;
-void hook_renderer_enabled(void* self,bool value){
-    if(guarded(self,false)){const bool block=!value;guard_note("Renderer.enabled",value,block);if(block){guard_blocked.fetch_add(1);return;}}
-    orig_renderer_enabled(self,value);
-}
-void hook_force_off(void* self,bool value){
-    if(guarded(self,false)){const bool block=value;guard_note("Renderer.forceRenderingOff",value,block);if(block){guard_blocked.fetch_add(1);return;}}
-    orig_force_off(self,value);
-}
-void hook_shadow_mode(void* self,int value){
-    if(guarded(self,false)){guard_note("Renderer.shadowCastingMode",value,false);}
-    orig_shadow_mode(self,value);
-}
-void hook_materials(void* self,void* array,int count){
-    if(guarded(self,false))guard_note("Renderer.SetMaterialArray",count,false);
-    orig_materials(self,array,count);
-}
-void hook_rendering_layer(void* self,uint32_t value){
-    if(guarded(self,false))guard_note("Renderer.renderingLayerMask",long(value),false);
-    orig_rendering_layer(self,value);
-}
-void hook_set_culling_matrix(void* self,void* matrix){
-    if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(self)==camera_controller.camera_native())guard_note("Camera.cullingMatrix=",0,false);
-    orig_set_culling_matrix(self,matrix);
-}
-void hook_reset_culling_matrix(void* self){
-    if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(self)==camera_controller.camera_native())guard_note("Camera.ResetCullingMatrix",0,false);
-    orig_reset_culling_matrix(self);
-}
-// IL2CPP wrappers (RVAs from the 1.16.11978 dump): the icall stubs for these are too short to
-// hook, but the managed wrappers are ordinary functions and their return address is the game
-// method that made the call.
-using WrapperBoolFn=void(*)(void*,bool,const void*);using WrapperIntFn=void(*)(void*,int,const void*);
-WrapperBoolFn orig_go_set_active=nullptr;WrapperIntFn orig_go_set_layer=nullptr,orig_camera_set_mask=nullptr;
-void* managed_native(void* managed){
-    if(!managed)return nullptr;
-    void* native=nullptr;std::memcpy(&native,static_cast<unsigned char*>(managed)+0x10,sizeof(native));return native;
-}
-void hook_go_set_active(void* self,bool value,const void* method){
-    if(guard_set.active&&own_calls==0&&guarded(managed_native(self),true)){
-        const bool block=!value;guard_note("GameObject.SetActive",value,block);if(block){guard_blocked.fetch_add(1);return;}
-    }
-    orig_go_set_active(self,value,method);
-}
-void hook_go_set_layer(void* self,int value,const void* method){
-    if(guard_set.active&&own_calls==0&&guarded(managed_native(self),true)){guard_note("GameObject.layer",value,true);guard_blocked.fetch_add(1);return;}
-    orig_go_set_layer(self,value,method);
-}
-void hook_camera_set_mask(void* self,int value,const void* method){
-    if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(managed_native(self))==camera_controller.camera_native())guard_note("Camera.cullingMask",value,false);
-    orig_camera_set_mask(self,value,method);
-}
-void hook_set_active(void* self,bool value){
-    if(guarded(self,true)){const bool block=!value;guard_note("GameObject.SetActive",value,block);if(block){guard_blocked.fetch_add(1);return;}}
-    orig_set_active(self,value);
-}
-void hook_set_layer(void* self,int value){
-    if(guarded(self,true)){guard_note("GameObject.layer",value,true);guard_blocked.fetch_add(1);return;}
-    orig_set_layer(self,value);
-}
-void hook_camera_mask(void* self,int value){
-    if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(self)==camera_controller.camera_native())guard_note("Camera.cullingMask",value,false);
-    orig_camera_mask(self,value);
-}
-// The icall entry points are tiny stubs ("tst w1,#0xff; cset w1,ne; b impl", or a lone
-// "b impl"). Dobby overwrites 16 bytes at the target, which clobbered the neighbouring
-// icalls and crashed the game the moment third person turned on. Follow the stub to the
-// real implementation and refuse any target that does not have four plain instructions.
-void* hook_target(void* function){
-    uintptr_t address=reinterpret_cast<uintptr_t>(function);
-    uint32_t code[6]{};
-    for(int hop=0;hop<4;++hop){
-        if(!raw_read(address,code,sizeof(code)))return nullptr;
-        size_t index=(code[0]==0x72001c3f&&code[1]==0x1a9f07e1)?2:0;
-        if((code[index]&0xfc000000)==0x14000000){
-            int64_t offset=int64_t(code[index]&0x03ffffff);if(offset&(1<<25))offset-=int64_t(1)<<26;
-            address=address+index*4+size_t(offset*4);continue;
-        }
-        break;
-    }
-    if(!raw_read(address,code,sizeof(code)))return nullptr;
-    for(int k=0;k<4;++k){
-        const uint32_t x=code[k];
-        if((x&0xfc000000)==0x14000000||x==0xd65f03c0||(x&0xfffffc1f)==0xd61f0000||(x&0xff000010)==0x54000000)return nullptr;
-    }
-    return reinterpret_cast<void*>(address);
-}
-void install_guard_hooks(mango_chams::Api::Resolve resolve){
-    static bool done=false;if(done)return;done=true;
-    struct Entry {const char* name;void* replacement;void** original;};
-    const Entry entries[]={
-        {"UnityEngine.Renderer::set_enabled_Injected(System.IntPtr,System.Boolean)",reinterpret_cast<void*>(hook_renderer_enabled),reinterpret_cast<void**>(&orig_renderer_enabled)},
-        {"UnityEngine.Renderer::set_forceRenderingOff_Injected(System.IntPtr,System.Boolean)",reinterpret_cast<void*>(hook_force_off),reinterpret_cast<void**>(&orig_force_off)},
-        {"UnityEngine.Renderer::set_shadowCastingMode_Injected(System.IntPtr,UnityEngine.Rendering.ShadowCastingMode)",reinterpret_cast<void*>(hook_shadow_mode),reinterpret_cast<void**>(&orig_shadow_mode)},
-        {"UnityEngine.Renderer::SetMaterialArray_Injected(System.IntPtr,UnityEngine.Material[],System.Int32)",reinterpret_cast<void*>(hook_materials),reinterpret_cast<void**>(&orig_materials)},
-        {"UnityEngine.Renderer::set_renderingLayerMask_Injected(System.IntPtr,System.UInt32)",reinterpret_cast<void*>(hook_rendering_layer),reinterpret_cast<void**>(&orig_rendering_layer)},
-        {"UnityEngine.Camera::set_cullingMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)",reinterpret_cast<void*>(hook_set_culling_matrix),reinterpret_cast<void**>(&orig_set_culling_matrix)},
-        {"UnityEngine.Camera::ResetCullingMatrix_Injected(System.IntPtr)",reinterpret_cast<void*>(hook_reset_culling_matrix),reinterpret_cast<void**>(&orig_reset_culling_matrix)},
-        {"UnityEngine.GameObject::SetActive_Injected(System.IntPtr,System.Boolean)",reinterpret_cast<void*>(hook_set_active),reinterpret_cast<void**>(&orig_set_active)},
-        {"UnityEngine.GameObject::set_layer_Injected(System.IntPtr,System.Int32)",reinterpret_cast<void*>(hook_set_layer),reinterpret_cast<void**>(&orig_set_layer)},
-        {"UnityEngine.Camera::set_cullingMask_Injected(System.IntPtr,System.Int32)",reinterpret_cast<void*>(hook_camera_mask),reinterpret_cast<void**>(&orig_camera_mask)},
-    };
-    struct Wrapper {const char* name;uintptr_t rva;void* replacement;void** original;};
-    const Wrapper wrappers[]={
-        {"GameObject.SetActive",0xD4BB8CC,reinterpret_cast<void*>(hook_go_set_active),reinterpret_cast<void**>(&orig_go_set_active)},
-        {"GameObject.set_layer",0xD4BB690,reinterpret_cast<void*>(hook_go_set_layer),reinterpret_cast<void**>(&orig_go_set_layer)},
-        {"Camera.set_cullingMask",0xD4351C0,reinterpret_cast<void*>(hook_camera_set_mask),reinterpret_cast<void**>(&orig_camera_set_mask)},
-    };
-    for(const auto& wrapper:wrappers){
-        void* target=reinterpret_cast<void*>(api.base+wrapper.rva);
-        if(!hook_target(target)){LOG("Guard: skipped wrapper %s (unexpected prologue)",wrapper.name);continue;}
-        const int result=hook(target,wrapper.replacement,wrapper.original);
-        LOG("Guard: hook wrapper %s -> %d (il2cpp+0x%lx)",wrapper.name,result,static_cast<unsigned long>(wrapper.rva));
-    }
-    for(const auto& entry:entries){
-        void* icall=resolve(entry.name);
-        if(!icall){LOG("Guard: icall missing: %s",entry.name);continue;}
-        void* target=hook_target(icall);
-        if(!target){LOG("Guard: skipped %s (implementation too short to hook safely)",entry.name);continue;}
-        const int result=hook(target,entry.replacement,entry.original);
-        LOG("Guard: hook %s -> %d (stub=+0x%lx impl=+0x%lx)",entry.name,result,
-            static_cast<unsigned long>(reinterpret_cast<uintptr_t>(icall)&0xffffff),static_cast<unsigned long>(reinterpret_cast<uintptr_t>(target)&0xffffff));
-    }
+    return remember.result=std::max(0.f,std::min(max_distance,traveled-.15f));
 }
 bool prepare_camera(){
     if(!want_third_person.load())return camera_api.loaded;
-    static bool logged_chams_api=false,logged_camera_api=false;
-    if(!chams_api.loaded){
-        if(!logged_chams_api){logged_chams_api=true;LOG("Third person: object API (chams_api) is not loaded, camera disabled");}
-        return false;
-    }
-    const auto resolve=raw_fn<mango_chams::Api::Resolve>(mango_offsets::resolve_icall);
-    if(!camera_api.load(resolve,chams_api)){
-        if(!logged_camera_api){logged_camera_api=true;LOG("Third person: camera icall binding failed (see 'missing icall' above)");}
-        return false;
-    }
+    if(!chams_api.loaded)return false;
+    const auto resolve=safe_graphics_icall;
+    if(!camera_api.load(resolve,chams_api))return false;
+    camera_api.bone=[](void* animator,int human)->void*{
+        try{
+            if(!raw_fn<bool(*)(Obj*,const Method*)>(0xD4091E0)(animator,nullptr))return nullptr;
+            return raw_fn<Obj*(*)(Obj*,int,const Method*)>(0xD40FE38)(animator,human,nullptr);
+        }catch(...){return nullptr;}
+    };
+    view_setup_api.read=raw_read;view_setup_api.is_type=raw_type_named;
+    view_setup_api.create=[](void* player){raw_fn<void(*)(Obj*,const Method*)>(0x6EFF164)(player,nullptr);};
+    view_setup_api.bind_animation=[](void* motor,void* animation){
+        const uintptr_t address=raw_type_named(motor,"KCC")?0x5F278E4:0x7CB4AD8;
+        raw_fn<void(*)(Obj*,Obj*,const Method*)>(address)(motor,animation,nullptr);
+    };
+    view_setup_api.bind_equipment=[](void* equipment,void* view){raw_fn<void(*)(Obj*,Obj*,const Method*)>(0x6ED8FB8)(equipment,view,nullptr);};
+    view_setup_api.active=camera_api.active_self;view_setup_api.set_active=camera_api.set_active;
+    weapon_view_api.read=raw_read;weapon_view_api.is_type=raw_type_named;
+    weapon_view_api.load=[](void* view,const mango_camera::WeaponPiece* piece){
+        raw_fn<void(*)(Obj*,const mango_camera::WeaponPiece*,Obj*,const Method*)>(0x5F62D0C)(view,piece,nullptr,nullptr);
+    };
+    weapon_view_api.state=[](void* view,int state){raw_fn<void(*)(Obj*,int,const Method*)>(0x5F6209C)(view,state,nullptr);};
     camera_api.collision=camera_collision_distance;camera_api.collision_context=&camera_collision;
     if(!camera_sphere)camera_sphere=reinterpret_cast<SphereCast>(resolve("UnityEngine.PhysicsScene::Query_SphereCast_Injected(UnityEngine.PhysicsScene&,UnityEngine.Vector3&,System.Single,UnityEngine.Vector3&,System.Single,UnityEngine.RaycastHit&,System.Int32,UnityEngine.QueryTriggerInteraction)"));
-    if(!original_camera_position){
-        const int result=hook(reinterpret_cast<void*>(api.base+0xD4CFB20),reinterpret_cast<void*>(camera_position_hook),reinterpret_cast<void**>(&original_camera_position));
-        if(result!=0){LOG("Third-person position hook failed: %d",result);return false;}
-    }
-    unity_camera_thread.store(pid_t(current_tid()));
-    install_guard_hooks(resolve);
-    return true;
+    unity_camera_thread.store(pid_t(syscall(SYS_gettid)));return true;
 }
 bool raw_type_named(Obj* object,const char* wanted){
     Obj* klass=raw_field<Obj*>(object,0);
@@ -1212,15 +1147,9 @@ void raw_observe(Obj* self,const V3* origin=nullptr,const mango_esp::Projection*
     unsigned old=max_observe_us.load();while(old<cost&&!max_observe_us.compare_exchange_weak(old,cost)){}
 }
 Snapshot publish_scratch; // Unity callbacks only
-void record_cost(std::atomic<uint64_t>& total,std::atomic<unsigned>& peak,std::atomic<unsigned>& samples,double start){
-    const unsigned cost=unsigned(std::max(0.0,(now()-start)*1000000));
-    total.fetch_add(cost);samples.fetch_add(1);
-    unsigned old=peak.load();while(old<cost&&!peak.compare_exchange_weak(old,cost)){}
-}
 void raw_publish(int phase=0){
     static thread_local bool entered=false;if(entered)return;entered=true;
     struct Leave {bool& entered;~Leave(){entered=false;}} leave{entered};
-    OwnScope own_scope;
     static mango_esp::FrameGate frame_gate;
     const int frame=raw_fn<int(*)(const Method*)>(0xD4B577C)(nullptr);
     if(!frame_gate.accept(frame,phase))return;
@@ -1257,6 +1186,10 @@ void raw_publish(int phase=0){
         camera=raw_fn<Camera>(0xD43AB4C)(nullptr);
     }
     Obj* native_camera=raw_field<Obj*>(camera,0x10);
+    if(want_third_person.load()){
+        Obj* main=raw_fn<Obj*(*)(const Method*)>(0xD43AB4C)(nullptr);
+        if(raw_field<Obj*>(main,0x10)){camera=main;native_camera=raw_field<Obj*>(main,0x10);}
+    }
     if(!native_camera||!local)camera=nullptr;
     Obj* list=raw_field<Obj*>(raw_static_fields(mango_offsets::player_type_got),0x10);
     const mango_esp::SessionKey key{reinterpret_cast<uintptr_t>(list),reinterpret_cast<uintptr_t>(local),
@@ -1266,54 +1199,46 @@ void raw_publish(int phase=0){
         {std::lock_guard<std::mutex> lock(raw_observations_mutex);raw_observations.clear();}
         live_players.clear();callback_players.clear();
         chams_controller.reset(chams_api);
+        avatar_controller.reset(avatar_api);grip_controller.reset(camera_api);
         third_camera_transform.store(0);camera_controller.reset(camera_api);
         local_player.store(nullptr);local_player_seen.store(0);
         LOG("Session %llu rebound: list=%p local=%p camera=%p",static_cast<unsigned long long>(raw_session.generation()),list,local,camera);
     }
     local_player.store(local);local_player_seen.store(local?time:0);
     raw_camera_seen.store(camera!=nullptr);
+    Obj* body_info=(want_third_person.load()||want_chams.load())?raw_body_info(local):nullptr;
+    const double graphics_start=now();prepare_graphics_types(body_info,time);
+    chams_cpu_ms.store(float((now()-graphics_start)*1000)*.2f+chams_cpu_ms.load()*.8f);
+    const double camera_start=now();
     if(!want_third_person.load()||!local||!camera){
-        third_camera_transform.store(0);guard_set.active=false;camera_controller.reset(camera_api);
-        tp_tint.reset(chams_api);
+        avatar_controller.suspend(avatar_api);avatar_asset.retry(time,true);grip_controller.reset(camera_api);report_avatar(0);
+        third_camera_transform.store(0);camera_controller.reset(camera_api);
+        local_weapon_view.reset();
+        if(view_setup_api.read)view_setup.update(view_setup_api,local,false,time);
     }else if(phase>0){
         if(prepare_camera()){
-            camera_collision.local=local;camera_collision.camera=camera;
+            camera_collision.local=local;
+            view_setup.update(view_setup_api,local,true,time);
+            static int previous_setup=-100;
+            if(view_setup.status!=previous_setup){previous_setup=view_setup.status;LOG("Third person setup: %d (3=live animation and equipment bound)",view_setup.status);}
             Obj* fp=raw_field<Obj*>(local,0x90);
             if(!raw_type_named(fp,"FPManager"))fp=nullptr;
             Obj* weapon=raw_field<Obj*>(fp,0x50);
             if(!raw_type_named(weapon,"FPObject"))weapon=nullptr;
-            Obj* animator=raw_field<Obj*>(local,0x1B0);
-            if(!raw_type_named(animator,"Animator"))animator=nullptr;
-            const double camera_start=now();
+            const auto view=mango_camera::player_view(local,raw_read,raw_type_named);
+            local_weapon_view.update(weapon_view_api,local,view,true,time);
+            static int previous_weapon=-100;
+            if(local_weapon_view.status!=previous_weapon){previous_weapon=local_weapon_view.status;LOG("Third person weapon: %d (2=loading, 3=ready)",previous_weapon);}
+            static void* previous_model=nullptr;
+            if(view.info!=previous_model){previous_model=view.info;LOG("Third person model: local=%d info=%p animator=%p fp_pass=%p layers=%08x",view.local,view.info,view.animator,view.render_controller,view.reserved_layers);}
             camera_controller.update(camera_api,camera,native_local,raw_field<void*>(fp,0x10),
-                raw_field<void*>(weapon,0x10),true,camera_distance.load(),frame,time,animator);
+                raw_field<void*>(weapon,0x10),true,camera_distance.load(),frame,time,view.animator,view.info,view.render_controller,view.reserved_layers,view.local,local_weapon_view.visual);
+            update_avatar(local,view,time);
             third_camera_transform.store(camera_controller.native_transform());
-            record_cost(camera_us_total,camera_us_max,camera_samples,camera_start);
-            {
-                static std::vector<mango_chams::Candidate> own;own.clear();
-                if(want_tp_solid.load()&&camera_controller.status==1)
-                    own.push_back({reinterpret_cast<uintptr_t>(local),reinterpret_cast<uintptr_t>(native_local),1.f,0,reinterpret_cast<uintptr_t>(raw_field<void*>(animator,0x10))});
-                mango_chams::Options solid{!own.empty(),true,.9f,1000.f,1};
-                tp_tint.update(chams_api,solid,own,time);
-            }
-            {
-                guard_set.renderer_count=guard_set.object_count=0;
-                camera_controller.each_guarded(camera_api,[&](int kind,void* native){
-                    auto& list=kind==0?guard_set.renderers:guard_set.objects;auto& count=kind==0?guard_set.renderer_count:guard_set.object_count;
-                    if(native&&count<list.size())list[count++]=reinterpret_cast<uintptr_t>(native);
-                });
-                guard_set.active=camera_controller.status==1;
-            }
-            if(const char* report=camera_controller.take_report()){
-                LOG("%s",report);
-                for(const char* line=camera_controller.detail();*line;){
-                    const char* end=std::strchr(line,'\n');const size_t length=end?size_t(end-line):std::strlen(line);
-                    LOG("%.*s",int(length),line);line+=length+(end?1:0);
-                }
-            }
         }else camera_controller.status=-1;
     }
     camera_status.store(camera_controller.status);camera_meshes.store(camera_controller.body_meshes);
+    camera_cpu_ms.store(float((now()-camera_start)*1000)*.2f+camera_cpu_ms.load()*.8f);
     Snapshot& next=publish_scratch;
     next.count=0;next.total=0;next.local=local!=nullptr;next.camera=camera!=nullptr;
     next.generation=raw_session.generation();next.stamp=time;
@@ -1418,34 +1343,15 @@ void raw_publish(int phase=0){
             }
         }
         mango_chams::Options options{want_chams.load(),true,chams_alpha.load(),chams_range.load(),unsigned(chams_limit.load())};
-        const double chams_start=now();
+        const double start=now();
         chams_controller.update(chams_api,options,candidates,time);
-        if(options.enabled){
-            record_cost(chams_us_total,chams_us_max,chams_samples,chams_start);
-            static double last_chams_log=0;
-            if(time-last_chams_log>=2){
-                last_chams_log=time;const auto& d=chams_controller.diag;
-                LOG("Chams: status=%d shader_kind=%d candidates=%zu actors=%u renderers=%u scanned_nodes=%u found=%u fail[no_native=%u slots=%u tint=%u backup=%u] swaps=%u drawn_by_engine=%u states[visible=%u occluded=%u unknown=%u] materials=%u id_failures=%u restore_errors=%u",
-                    chams_controller.status,chams_controller.shader_kind,candidates.size(),d.actors,chams_controller.renderer_count,d.nodes,d.found,
-                    d.no_native,d.bad_slots,d.no_tint,d.no_backup,d.swaps,d.drawn,d.state_visible,d.state_occluded,d.state_unknown,
-                    chams_controller.material_creations,chams_api.id_failures,chams_controller.restore_errors);
-            }
-        }
+        chams_cpu_ms.store(float((now()-start)*1000)*.2f+chams_cpu_ms.load()*.8f);
         chams_status.store(chams_controller.status);chams_renderers.store(chams_controller.renderer_count);
         chams_shader.store(chams_controller.shader_kind);
         chams_creations.store(chams_controller.material_creations);chams_restore_errors.store(chams_controller.restore_errors);
     }
     {std::lock_guard<std::mutex> lock(snapshot_mutex);published.assign(next);}
     player_features_tick(time);
-    static double last_diag=0;
-    if(time-last_diag>=2){
-        last_diag=time;
-        size_t observed=0;{std::lock_guard<std::mutex> lock(raw_observations_mutex);observed=raw_observations.size();}
-        LOG("Diag: phase=%d frame=%d local=%d camera=%d list_valid=%d registry=%d players=%zu observed=%zu draw=%d | third_person=%d status=%d camera_api=%d meshes=%u | chams=%d status=%d api=%d | session=%llu",
-            phase,frame,local!=nullptr,camera!=nullptr,list_valid,registry_healthy.load(),current.size(),observed,want_esp.load(),
-            want_third_person.load(),camera_controller.status,camera_api.loaded,camera_meshes.load(),
-            want_chams.load(),chams_controller.status,chams_api.loaded,static_cast<unsigned long long>(raw_session.generation()));
-    }
     unsigned cost=unsigned(std::max(0.0,(now()-time)*1000000));
     capture_samples.fetch_add(1);capture_total_us.fetch_add(cost);
     unsigned old=max_publish_us.load();while(old<cost&&!max_publish_us.compare_exchange_weak(old,cost)){}
@@ -1509,7 +1415,7 @@ using RawRay=Ray(*)(Obj*,const Method*);
 RawRay original_ray_lsb=nullptr,original_ray_zzc=nullptr;
 Ray magic_ray(Obj* self,const Method* method,RawRay original){
     Ray ray=original?original(self,method):Ray{};
-    if(want_third_person.load()&&current_tid()==unity_camera_thread.load()){
+    if(want_third_person.load()&&syscall(SYS_gettid)==unity_camera_thread.load()){
         const auto origin=camera_controller.undo_ray_origin({ray.origin.x,ray.origin.y,ray.origin.z});
         ray.origin={origin.x,origin.y,origin.z};
     }
@@ -1538,7 +1444,7 @@ Ray raw_hook_ray_zzc(Obj* self,const Method* method){
 using HitRay=void(*)(Obj*,Ray,const Method*);
 HitRay original_hit_zer=nullptr,original_hit_zmm=nullptr,original_hit_loa=nullptr;
 void magic_hit_ray(Obj* self,Ray ray,const Method* method,HitRay original){
-    if(want_third_person.load()&&current_tid()==unity_camera_thread.load()){
+    if(want_third_person.load()&&syscall(SYS_gettid)==unity_camera_thread.load()){
         const auto origin=camera_controller.undo_ray_origin({ray.origin.x,ray.origin.y,ray.origin.z});
         ray.origin={origin.x,origin.y,origin.z};
     }
@@ -1580,14 +1486,33 @@ using RawCanvas=void(*)(const Method*);
 RawCallback original_raw_update=nullptr;
 RawCanvas original_raw_canvas=nullptr;
 RawCanvas original_raw_before=nullptr;
+using RawBeginCamera=void(*)(void*,Obj*,const Method*);
+RawBeginCamera original_raw_begin_camera=nullptr;
+void raw_hook_begin_camera(void* context,Obj* camera,const Method* method){
+    if(original_raw_begin_camera)original_raw_begin_camera(context,camera,method);
+    // URP calls this after its beginCameraRendering subscribers and before
+    // culling. Reassert cached local render state only for the selected camera.
+    static thread_local const pid_t callback_thread=pid_t(syscall(SYS_gettid));
+    if(want_third_person.load(std::memory_order_relaxed)&&callback_thread==unity_camera_thread.load()&&camera_controller.shifted()&&camera_controller.selected(camera_api,camera)){
+        camera_controller.before_cull(camera_api,camera);
+        if(camera_controller.body_visible()){
+            Obj* player=static_cast<Obj*>(local_player.load());const auto view=mango_camera::player_view(player,raw_read,raw_type_named);
+            Obj* pivot=mango_camera::left_hand_grip(weapon_view_api,player,view);
+            if(pivot)grip_controller.apply(camera_api,view.animator,raw_field<void*>(pivot,0x10),camera_controller.frame(),now());
+            else grip_controller.restore(camera_api);
+        }else grip_controller.restore(camera_api);
+        if(want_custom_model.load()&&avatar_controller.visible&&camera_controller.body_visible()){
+            const bool visible=avatar_controller.pose(avatar_api);camera_controller.replace_body(camera_api,visible);
+        }
+    }
+}
 void raw_hook_update(Obj* self,const Method* method){
-    if(third_camera_transform.load(std::memory_order_relaxed)&&current_tid()==unity_camera_thread.load()){
-        camera_controller.begin_frame(camera_api,raw_fn<int(*)(const Method*)>(0xD4B577C)(nullptr));
+    static thread_local const pid_t callback_thread=pid_t(syscall(SYS_gettid));
+    if(third_camera_transform.load(std::memory_order_relaxed)&&callback_thread==unity_camera_thread.load()&&camera_controller.shifted()){
+        const int frame=raw_fn<int(*)(const Method*)>(0xD4B577C)(nullptr);
+        grip_controller.begin_frame(camera_api,frame);camera_controller.begin_frame(camera_api,frame);
     }
     if(original_raw_update)original_raw_update(self,method);
-    if(self&&self==local_player.load()&&want_third_person.load()&&current_tid()==unity_camera_thread.load()){
-        OwnScope own_scope;camera_controller.before_animation(camera_api);
-    }
     if(self&&!registry_healthy.load()){
         const auto native=raw_field<uintptr_t>(self,0x10);
         if(native){
@@ -1616,6 +1541,7 @@ bool install_raw_hooks(){
     static bool player_installed=false,canvas_installed=false,before_installed=false;
     static bool lsb_installed=false,zzc_installed=false;
     static bool zer_installed=false,zmm_installed=false,loa_installed=false;
+    static bool begin_camera_installed=false;
     int player=0,canvas=0,lsb=0,zzc=0;
     int zer=0,zmm=0,loa=0;
     if(!player_installed){
@@ -1632,6 +1558,10 @@ bool install_raw_hooks(){
         const int result=hook(reinterpret_cast<void*>(api.base+0xD431BF8),
             reinterpret_cast<void*>(raw_hook_before),reinterpret_cast<void**>(&original_raw_before));
         before_installed=result==0;
+    }
+    if(!begin_camera_installed){
+        const int result=hook(reinterpret_cast<void*>(api.base+0xD4FA514),reinterpret_cast<void*>(raw_hook_begin_camera),reinterpret_cast<void**>(&original_raw_begin_camera));
+        begin_camera_installed=result==0;
     }
     if(!lsb_installed){
         lsb=hook(reinterpret_cast<void*>(api.base+0x6D8F10C),
@@ -1660,9 +1590,9 @@ bool install_raw_hooks(){
     }
     magic_hook_state.store((lsb_installed?1:0)|(zzc_installed?2:0)|
                            (zer_installed?4:0)|(zmm_installed?8:0)|(loa_installed?16:0));
-    raw_hooks_complete.store(player_installed&&canvas_installed&&before_installed);
-    LOG("Raw callbacks: Player=%d Canvas=%d Before=%d Ray=%d/%d Hitscan=%d/%d/%d",
-        player,canvas,before_installed,lsb,zzc,zer,zmm,loa);
+    raw_hooks_complete.store(player_installed&&canvas_installed&&before_installed&&begin_camera_installed);
+    LOG("Raw callbacks: Player=%d Canvas=%d Before=%d BeginCamera=%d Ray=%d/%d Hitscan=%d/%d/%d",
+        player,canvas,before_installed,begin_camera_installed,lsb,zzc,zer,zmm,loa);
     if(player_installed||canvas_installed||before_installed){model_ready.store(true);return true;}
     return false;
 }
@@ -1746,8 +1676,7 @@ void load_config(){
         int chams=0,limit=16;float alpha=.28f,chams_distance=80;
         if(std::fscanf(f,"%d %f %f %d",&chams,&alpha,&chams_distance,&limit)==4){
             cfg.chams=chams!=0;
-            // 0.28 was the old default and is too faint to read as chams.
-            if(std::isfinite(alpha))cfg.chams_alpha=std::fabs(alpha-.28f)<.005f?.6f:std::clamp(alpha,.05f,1.f);
+            if(std::isfinite(alpha))cfg.chams_alpha=std::clamp(alpha,.05f,.65f);
             if(std::isfinite(chams_distance))cfg.chams_range=std::clamp(chams_distance,15.f,150.f);
             cfg.chams_limit=std::clamp(limit,4,32);
         }
@@ -1755,9 +1684,8 @@ void load_config(){
         if(std::fscanf(f,"%d %f",&third,&distance)==2){
             cfg.third_person=third!=0;
             if(std::isfinite(distance))cfg.camera_distance=std::clamp(distance,.8f,5.f);
-            int solid=0;
-            if(std::fscanf(f,"%d",&solid)==1)cfg.tp_solid=solid!=0;
         }
+        int model=0;if(std::fscanf(f,"%d",&model)==1)cfg.custom_model=model!=0;
     }
     std::fclose(f);
 }
@@ -1768,7 +1696,7 @@ void save_config(){
         cfg.range,cfg.color[0],cfg.color[1],cfg.color[2],cfg.magic_bullet,cfg.magic_fov,
         cfg.magic_ads_only,cfg.magic_team_filter,cfg.magic_point,
         cfg.no_recoil,cfg.no_spread,cfg.no_weapon_motion,cfg.visibility_check,cfg.visible_only,
-        cfg.chams,cfg.chams_alpha,cfg.chams_range,cfg.chams_limit,cfg.third_person,cfg.camera_distance,cfg.tp_solid);
+        cfg.chams,cfg.chams_alpha,cfg.chams_range,cfg.chams_limit,cfg.third_person,cfg.camera_distance,cfg.custom_model);
     std::lock_guard<std::mutex> lock(config_queue_mutex);queued_config=text;config_queued=true;
 }
 void flush_config(){
@@ -1837,7 +1765,7 @@ void sync_config(){
     want_esp.store(cfg.enabled);want_skeleton.store(cfg.enabled&&cfg.skeleton);esp_range.store(cfg.range);
     want_visibility.store(cfg.visibility_check&&(cfg.enabled||cfg.chams));
     want_chams.store(cfg.chams);
-    want_third_person.store(cfg.third_person);camera_distance.store(cfg.camera_distance);want_tp_solid.store(cfg.third_person&&cfg.tp_solid);
+    want_third_person.store(cfg.third_person);want_custom_model.store(cfg.custom_model);camera_distance.store(cfg.camera_distance);
     chams_alpha.store(cfg.chams_alpha);chams_range.store(cfg.chams_range);chams_limit.store(cfg.chams_limit);
     want_magic_bullet.store(cfg.magic_bullet);magic_fov.store(cfg.magic_fov);
     want_magic_ads_only.store(cfg.magic_ads_only);want_magic_team_filter.store(cfg.magic_team_filter);
@@ -1845,7 +1773,7 @@ void sync_config(){
     want_no_recoil.store(cfg.no_recoil);want_no_spread.store(cfg.no_spread);want_no_weapon_motion.store(cfg.no_weapon_motion);
 }
 void draw_menu(int w,int h,int players=-1){
-    const auto result=mango_ui::Draw(cfg,menu_state,w,h,players,chams_status.load(),chams_renderers.load(),camera_status.load(),camera_meshes.load());
+    const auto result=mango_ui::Draw(cfg,menu_state,w,h,players,chams_status.load(),chams_renderers.load(),camera_status.load(),camera_meshes.load(),shader_stage.load(),chams_cpu_ms.load(),camera_cpu_ms.load(),custom_model_status.load());
     menu_is_open.store(result.open);menu_popup_open.store(result.popup);
     menu_x0.store(result.min.x);menu_y0.store(result.min.y);
     menu_x1.store(result.max.x);menu_y1.store(result.max.y);
@@ -1920,55 +1848,17 @@ void install_render_hooks(){
         int r=hook(target,entry.replacement,entry.original);if(r==0){installed.push_back(target);LOG("Render hook: %s",entry.name);}
     }
 }
-// Writes the faulting address and a frame-pointer backtrace to the log file before the
-// game's own crash reporter (or the default action) takes over.
-struct sigaction crash_old[8];int crash_signals[]={SIGSEGV,SIGBUS,SIGILL,SIGABRT,SIGFPE,SIGTRAP};
-void crash_write(const char* text){
-    const size_t length=std::strlen(text);
-    for(FILE* f:file_log_handles)if(f)(void)!write(fileno(f),text,length);
-}
-void crash_handler(int signal_number,siginfo_t* info,void* context){
-    char line[640];
-    auto* uc=static_cast<ucontext_t*>(context);
-    const uintptr_t pc=uc?uintptr_t(uc->uc_mcontext.pc):0,lr=uc?uintptr_t(uc->uc_mcontext.regs[30]):0,sp=uc?uintptr_t(uc->uc_mcontext.sp):0;
-    std::snprintf(line,sizeof(line),"CRASH signal=%d code=%d fault=%p pc=0x%lx (il2cpp+0x%lx) lr=0x%lx (il2cpp+0x%lx) sp=0x%lx\n",
-        signal_number,info?info->si_code:0,info?info->si_addr:nullptr,static_cast<unsigned long>(pc),static_cast<unsigned long>(pc-api.base),
-        static_cast<unsigned long>(lr),static_cast<unsigned long>(lr-api.base),static_cast<unsigned long>(sp));
-    crash_write(line);
-    uintptr_t frame=uc?uintptr_t(uc->uc_mcontext.regs[29]):0;
-    for(int i=0;i<10&&frame&&!(frame&7);++i){
-        uintptr_t next=0,ret=0;
-        if(!raw_read(frame,&next,sizeof(next))||!raw_read(frame+8,&ret,sizeof(ret)))break;
-        std::snprintf(line,sizeof(line),"CRASH frame %d ret=0x%lx (il2cpp+0x%lx)\n",i,static_cast<unsigned long>(ret),static_cast<unsigned long>(ret-api.base));
-        crash_write(line);
-        if(next<=frame)break;frame=next;
-    }
-    for(size_t i=0;i<sizeof(crash_signals)/sizeof(crash_signals[0]);++i){
-        if(crash_signals[i]!=signal_number)continue;
-        const struct sigaction& old=crash_old[i];
-        if(old.sa_flags&SA_SIGINFO&&old.sa_sigaction){old.sa_sigaction(signal_number,info,context);return;}
-        if(!(old.sa_flags&SA_SIGINFO)&&old.sa_handler&&old.sa_handler!=SIG_DFL&&old.sa_handler!=SIG_IGN){old.sa_handler(signal_number);return;}
-    }
-    signal(signal_number,SIG_DFL);raise(signal_number);
-}
-void install_crash_handler(){
-    static bool done=false;if(done)return;done=true;
-    for(size_t i=0;i<sizeof(crash_signals)/sizeof(crash_signals[0]);++i){
-        struct sigaction action{};action.sa_sigaction=crash_handler;action.sa_flags=SA_SIGINFO|SA_ONSTACK;sigemptyset(&action.sa_mask);
-        sigaction(crash_signals[i],&action,&crash_old[i]);
-    }
-    LOG("Crash handler installed");
-}
 void boot(){
     char cmd[256]{};FILE* f=std::fopen("/proc/self/cmdline","r");if(f){std::fread(cmd,1,sizeof(cmd)-1,f);std::fclose(f);}
     if(std::strcmp(cmd,package)){LOG("Wrong process: %s",cmd);return;}
-    load_config();sync_config();
     LOG("boot: pid=%d uid=%u revision=%s",int(getpid()),unsigned(getuid()),revision_marker);
-    install_crash_handler();
+    mango_log::install_crash_handler();
+    load_config();sync_config();write_shader_file();write_avatar_file();
     raw_observations.reserve(max_players);
     LOG("MANGOcheat ESP %s build %s %s package=%s",revision_marker,__DATE__,__TIME__,package);void* attached=nullptr;
     for(unsigned attempts=0;;++attempts){
-        flush_config();
+        if(!shader_file_ready.load()&&attempts%10==0)write_shader_file();
+        flush_config();write_avatar_file();
         install_render_hooks();
         const double first_frame=first_egl_frame_at.load();
         const bool graphics_stable=first_frame>0&&now()-first_frame>=4.0;
@@ -2020,11 +1910,6 @@ void boot(){
             LOG("Perf: capture_avg=%llu us render_avg=%llu us render_max=%u us samples=%u/%u chams=%d shader=%d meshes=%u material_creations=%u restore_errors=%u camera=%d body_meshes=%u",
                 static_cast<unsigned long long>(count?capture_time/count:0),static_cast<unsigned long long>(draws?render_time/draws:0),max_render_us.exchange(0),count,draws,
                 chams_status.load(),chams_shader.load(),chams_renderers.load(),chams_creations.load(),chams_restore_errors.load(),camera_status.load(),camera_meshes.load());
-            const unsigned camera_n=camera_samples.exchange(0),chams_n=chams_samples.exchange(0);
-            const uint64_t camera_total=camera_us_total.exchange(0),chams_total=chams_us_total.exchange(0);
-            LOG("Cost: third_person avg=%llu max=%u us (%u frames) chams avg=%llu max=%u us (%u ticks)",
-                static_cast<unsigned long long>(camera_n?camera_total/camera_n:0),camera_us_max.exchange(0),camera_n,
-                static_cast<unsigned long long>(chams_n?chams_total/chams_n:0),chams_us_max.exchange(0),chams_n);
             LOG("Visibility: rays=%u clear=%u target=%u world=%u own=%u scene_fail=%u binding_fail=%u invalid_hit=%u collider_fail=%u budget=%u",
                 raw_engine.metrics[0].exchange(0),raw_engine.metrics[1].exchange(0),raw_engine.metrics[2].exchange(0),raw_engine.metrics[3].exchange(0),
                 raw_engine.metrics[4].exchange(0),raw_engine.metrics[5].exchange(0),raw_engine.metrics[6].exchange(0),raw_engine.metrics[7].exchange(0),raw_engine.metrics[8].exchange(0),raw_engine.metrics[9].exchange(0));

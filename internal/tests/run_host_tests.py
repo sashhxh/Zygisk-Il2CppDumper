@@ -9,7 +9,7 @@ root = Path(__file__).resolve().parents[1]
 cxx = os.environ.get('CXX', 'g++')
 with tempfile.TemporaryDirectory(prefix='mango-tests-') as temporary:
     work = Path(temporary)
-    for name in ('chams', 'third_person', 'unity_state', 'esp_capture', 'unity_return', 'runtime_image'):
+    for name in ('chams', 'third_person', 'local_player_view', 'local_view_setup', 'local_weapon_view', 'two_hand_pose', 'custom_avatar', 'avatar_storage', 'local_body_geometry', 'graphics_roots', 'graphics_metadata', 'shader_asset', 'unity_state', 'esp_capture', 'unity_return', 'runtime_image'):
         binary = work / name
         subprocess.run([
             cxx, '-std=c++17', '-g', '-fsanitize=address,undefined',
