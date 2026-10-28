@@ -4,6 +4,10 @@
 #include <cstdio>
 
 namespace mango_camera {
+// The game hides the local body from the normal passes by moving its renderers to another
+// URP rendering layer (FirstPersonRenderController + FirstPersonRenderFeature draw them only in
+// the first-person pass); the default layer is bit 0.
+constexpr uint32_t kBodyRenderingLayer=1u;
 constexpr bool kCameraOcclusionFallback=false;
 struct V3 {float x=0,y=0,z=0;};
 struct Quaternion {float x=0,y=0,z=0,w=1;};
@@ -41,6 +45,7 @@ struct Api {
     bool(*camera_occlusion)(void*)=nullptr;void(*set_camera_occlusion)(void*,bool)=nullptr;
     // A game that sets Camera.cullingMatrix (floating-origin / first-person tricks) makes the
     // engine cull with a frustum that does not follow our shifted camera.
+    uint32_t(*rendering_layer)(void*)=nullptr;void(*set_rendering_layer)(void*,uint32_t)=nullptr;
     void(*reset_culling)(void*)=nullptr;
     void(*culling_matrix)(void*,float*)=nullptr,(*view_matrix)(void*,float*)=nullptr,(*projection_matrix)(void*,float*)=nullptr;
     bool loaded=false;
@@ -79,6 +84,8 @@ struct Api {
         culling_matrix=reinterpret_cast<decltype(culling_matrix)>(resolve("UnityEngine.Camera::get_cullingMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
         view_matrix=reinterpret_cast<decltype(view_matrix)>(resolve("UnityEngine.Camera::get_worldToCameraMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
         projection_matrix=reinterpret_cast<decltype(projection_matrix)>(resolve("UnityEngine.Camera::get_nonJitteredProjectionMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"));
+        rendering_layer=reinterpret_cast<decltype(rendering_layer)>(resolve("UnityEngine.Renderer::get_renderingLayerMask_Injected(System.IntPtr)"));
+        set_rendering_layer=reinterpret_cast<decltype(set_rendering_layer)>(resolve("UnityEngine.Renderer::set_renderingLayerMask_Injected(System.IntPtr,System.UInt32)"));
 #undef TP_BIND
         loaded=objects->loaded;return loaded;
     }
@@ -174,6 +181,7 @@ class Controller {
         bool occlusion=true,occlusion_owned=false;
         int shadows=0,layer=0;
         uintptr_t go=0; // a Renderer never changes GameObject; saves 3 calls per frame
+        uint32_t rlm=kBodyRenderingLayer;bool rlm_owned=false;
     };
     std::vector<Renderer> renderers_;
     LocalModel model_;
@@ -197,6 +205,7 @@ class Controller {
         if(!r.fp&&api.shadows(p)==1)api.set_shadows(p,r.shadows);
         if(!r.fp&&r.skinned&&api.offscreen(p))api.set_offscreen(p,r.offscreen);
         if(!r.fp&&r.occlusion_owned&&api.objects->occlusion&&!api.objects->occlusion(p))api.objects->set_occlusion(p,r.occlusion);
+        if(!r.fp&&r.rlm_owned&&api.rendering_layer&&api.rendering_layer(p)==kBodyRenderingLayer)api.set_rendering_layer(p,r.rlm);
         if(!r.fp&&api.objects->force_off_offset>=0&&!api.objects->field<uint8_t>(p,size_t(api.objects->force_off_offset)))api.objects->set_force_off(p,r.force_off);
     }
     void add_renderer(Api& api,int32_t id,bool fp,bool skinned){
@@ -365,6 +374,10 @@ public:
                 // the ones without it stayed visible: baked occlusion data hides the body
                 // from the shifted camera position.
                 if(objects.occlusion&&objects.set_occlusion&&objects.occlusion(p)){objects.set_occlusion(p,false);it->occlusion_owned=true;}
+                if(api.rendering_layer&&api.set_rendering_layer){
+                    const uint32_t current_layer=api.rendering_layer(p);
+                    if(current_layer!=kBodyRenderingLayer){if(!it->rlm_owned){it->rlm=current_layer;it->rlm_owned=true;}api.set_rendering_layer(p,kBodyRenderingLayer);}
+                }
                 if(api.is_visible&&api.is_visible(p))++drawn;
                 // The game may move the model between layers (hidden / shown);
                 // use the layer it has right now, not the one seen at discovery.
@@ -417,8 +430,8 @@ public:
                 if(api.bounds)api.bounds(p,b);
                 if(api.lossy_scale){void* t=objects.native_return(api.game_transform(reinterpret_cast<void*>(r.go)));if(t)api.lossy_scale(t,&sc);}
                 if(r.skinned&&api.shared_mesh)mesh=api.shared_mesh(p)?1:0;
-                d+=std::snprintf(detail_+d,sizeof(detail_)-size_t(d),"TP renderer %d %s L%d visible=%d occlusion=%d mesh=%d bounds=(%.1f,%.1f,%.1f)+-(%.2f,%.2f,%.2f) scale=(%.2f,%.2f,%.2f)\n",
-                    r.id,r.fp?"fp":"body",r.layer,vis,objects.occlusion?int(objects.occlusion(p)):-1,mesh,b[0],b[1],b[2],b[3],b[4],b[5],sc.x,sc.y,sc.z);
+                d+=std::snprintf(detail_+d,sizeof(detail_)-size_t(d),"TP renderer %d %s L%d visible=%d occlusion=%d rlm=%u(was %u) mesh=%d bounds=(%.1f,%.1f,%.1f)+-(%.2f,%.2f,%.2f) scale=(%.2f,%.2f,%.2f)\n",
+                    r.id,r.fp?"fp":"body",r.layer,vis,objects.occlusion?int(objects.occlusion(p)):-1,api.rendering_layer?api.rendering_layer(p):0u,r.rlm_owned?r.rlm:(api.rendering_layer?api.rendering_layer(p):0u),mesh,b[0],b[1],b[2],b[3],b[4],b[5],sc.x,sc.y,sc.z);
             }
             report_ready_=true;
         }

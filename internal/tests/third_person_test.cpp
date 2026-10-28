@@ -12,7 +12,7 @@ struct Object {
     Managed managed;int32_t transform=0,game=0,renderer=0,parent=0;
     std::vector<int32_t> children;
     V3 position{};Quaternion rotation{};
-    bool enabled=true,active=true,offscreen=false,force_off=true,occlusion=true;int shadows=1,layer=0,mask=1,culling=2,model=0,animation=0,animator=0;
+    bool enabled=true,active=true,offscreen=false,force_off=true,occlusion=true;uint32_t rlm=1;int shadows=1,layer=0,mask=1,culling=2,model=0,animation=0,animator=0;
     std::map<std::string,int> refs;
 };
 std::map<int32_t,std::unique_ptr<Object>> objects;
@@ -45,7 +45,7 @@ int main(){
     objects_api.set_force_off=[](void* p,bool value){obj(p).force_off=value;};
     objects_api.occlusion=[](void* p){return obj(p).occlusion;};objects_api.set_occlusion=[](void* p,bool v){obj(p).occlusion=v;};
     objects_api.named_ref=[](void* managed,const char* name)->void*{auto& refs=obj(static_cast<Managed*>(managed)->native).refs;auto it=refs.find(name);return it==refs.end()?nullptr:find(it->second);};
-    Api api;api.loaded=true;api.objects=&objects_api;api.collision=collision;
+    Api api;api.loaded=true;api.rendering_layer=[](void* p){return obj(p).rlm;};api.set_rendering_layer=[](void* p,uint32_t v){obj(p).rlm=v;};api.objects=&objects_api;api.collision=collision;
     api.position=[](void* p,V3* out){*out=obj(p).position;};api.set_position=[](void* p,V3* v){obj(p).position=*v;};
     api.rotation=[](void* p,Quaternion* out){*out=obj(p).rotation;};
     api.mask=[](void* p){return obj(p).mask;};api.set_mask=[](void* p,int v){obj(p).mask=v;};
@@ -68,7 +68,7 @@ int main(){
     auto& camera_t=make(2);camera_t.position={10,2,30};camera_t.game=3;make(3).transform=2;
     auto& owner=make(10);owner.transform=11;
     auto& root=make(11);root.game=12;root.children={14};make(12).renderer=13;objects[12]->transform=11;
-    auto& body=make(13);body.game=12;body.enabled=false;body.shadows=3;objects[12]->layer=11;
+    auto& body=make(13);body.game=12;body.enabled=false;body.shadows=3;body.rlm=1u<<5;objects[12]->layer=11;
     auto& fp_t=make(14);fp_t.game=15;fp_t.parent=11;
     make(15).renderer=16;objects[15]->transform=14;objects[15]->layer=8;auto& arms=make(16);arms.game=15;
     auto& fp=make(20);fp.transform=14;
@@ -77,6 +77,7 @@ int main(){
     assert(controller.status==1&&controller.body_meshes==1&&controller.shifted());
     assert(body.enabled&&body.shadows==1&&body.offscreen&&!body.force_off&&!arms.enabled&&camera.mask==(1|(1<<11)));
     assert(!body.occlusion); // baked occlusion culling must not hide the body from the shifted camera
+    assert(body.rlm==1); // moved off the first-person-only rendering layer
     const V3 behind=camera_t.position;same(behind,{10.3f,2.15f,27.5f});
     same(controller.undo_ray_origin(behind),eye);same(controller.undo_ray_origin(eye),eye);
     // Repeated callback in one frame cannot accumulate the offset or rescan.
@@ -93,6 +94,7 @@ int main(){
     same(controller.undo_ray_origin(camera_t.position),eye);same(controller.undo_ray_origin(eye),eye);
     assert(!body.enabled&&body.shadows==3&&!body.offscreen&&body.force_off&&arms.enabled&&camera.mask==mask);
     assert(body.occlusion);
+    assert(body.rlm==(1u<<5));
     controller.reset(api);same(camera_t.position,eye);assert(controller.status==0);
     // Game-authored motion must survive reset. Rotation changes the orbit.
     limit=10;camera_t.rotation={0,1,0,0};

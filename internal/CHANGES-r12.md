@@ -79,3 +79,11 @@
   фрустуму, который не следует за сдвинутой камерой (тело вокруг головы оказывается вне фрустума).
 - ТП каждый кадр после сдвига вызывает `Camera.ResetCullingMatrix`. В лог TP-строки добавлено `cull_matrix_diff` — расхождение культ-матрицы с P*V
   сдвинутой камеры до сброса (≈0 — гипотеза неверна, >0.01 — подтверждена).
+
+## r12h (по дампу https://github.com/xvcen/1)
+- В `dump.cs`: `Oxide.Features.Rendering.FirstPersonRenderController` + `FirstPersonRenderFeature` (URP ScriptableRendererFeature) + `FirstPersonRenderSettings`
+  с тремя `RenderingLayerMask` (`maskedRenderingLayerMask` @0x1C, `shiftedRenderingLayerMask` @0x20, `worldSpaceRenderingLayerMask` @0x24), своим FOV, near/far и depth clear.
+  Контроллер держит списки `Renderer`/`SkinnedMeshRenderer` и статическими `kqI/ueZ/crA/ZDZ/cHH(Renderer, uint, uint)` переставляет им rendering layer:
+  такие рендереры рисует только first-person проход, обычные проходы их пропускают. Это объясняет тело, которое «включено, но не рисуется».
+- ТП теперь читает `Renderer.renderingLayerMask` рендереров тела и ставит default-слой (бит 0), возвращая исходное при выключении.
+  В лог: `rlm=<сейчас>(was <исходный>)` и `Guard: Renderer.renderingLayerMask(...)` при вызовах игры.
