@@ -37,6 +37,7 @@ struct Api {
     void(*bounds)(void*,float*)=nullptr;   // center xyz, extents xyz
     void(*lossy_scale)(void*,V3*)=nullptr;
     void*(*shared_mesh)(void*)=nullptr;
+    bool(*camera_occlusion)(void*)=nullptr;void(*set_camera_occlusion)(void*,bool)=nullptr;
     bool loaded=false;
     bool load(mango_chams::Api::Resolve resolve,mango_chams::Api& api){
         if(loaded)return true;objects=&api;
@@ -67,6 +68,8 @@ struct Api {
         bounds=reinterpret_cast<decltype(bounds)>(resolve("UnityEngine.Renderer::get_bounds_Injected(System.IntPtr,UnityEngine.Bounds&)"));
         lossy_scale=reinterpret_cast<decltype(lossy_scale)>(resolve("UnityEngine.Transform::get_lossyScale_Injected(System.IntPtr,UnityEngine.Vector3&)"));
         shared_mesh=reinterpret_cast<decltype(shared_mesh)>(resolve("UnityEngine.SkinnedMeshRenderer::get_sharedMesh_Injected(System.IntPtr)"));
+        camera_occlusion=reinterpret_cast<decltype(camera_occlusion)>(resolve("UnityEngine.Camera::get_useOcclusionCulling_Injected(System.IntPtr)"));
+        set_camera_occlusion=reinterpret_cast<decltype(set_camera_occlusion)>(resolve("UnityEngine.Camera::set_useOcclusionCulling_Injected(System.IntPtr,System.Boolean)"));
 #undef TP_BIND
         loaded=objects->loaded;return loaded;
     }
@@ -164,7 +167,8 @@ class Controller {
     std::vector<Renderer> renderers_;
     LocalModel model_;
     std::deque<int32_t> queue_;std::unordered_set<int32_t> visited_;
-    bool fp_root_known_=false;
+    bool fp_root_known_=false,camera_occlusion_owned_=false,camera_occlusion_original_=true;
+    double invisible_since_=-1;
     char report_[768]{},detail_[1800]{};bool report_ready_=false;double next_report_=0;
     int32_t camera_=0,transform_=0;
     uintptr_t camera_native_=0,transform_native_=0,owner_=0,fp_=0,weapon_=0,animator_=0;
@@ -265,12 +269,13 @@ public:
             begin_frame(api,applied_frame_-1);
             void* camera=api.objects->live(camera_);
             if(mask_owned_&&reinterpret_cast<uintptr_t>(camera)==camera_native_&&api.mask(camera)==applied_mask_)api.set_mask(camera,original_mask_);
+            if(camera_occlusion_owned_&&reinterpret_cast<uintptr_t>(camera)==camera_native_&&api.camera_occlusion&&!api.camera_occlusion(camera))api.set_camera_occlusion(camera,camera_occlusion_original_);
             for(auto& renderer:renderers_)restore_renderer(api,renderer);
             model_.reset(api);
         }
         renderers_.clear();queue_.clear();visited_.clear();camera_=transform_=0;
         camera_native_=transform_native_=owner_=fp_=weapon_=animator_=0;shifted_=mask_owned_=false;next_scan_=0;status=0;body_meshes=0;
-        report_ready_=false;next_report_=0;fp_root_known_=false;
+        report_ready_=false;next_report_=0;fp_root_known_=false;camera_occlusion_owned_=false;invisible_since_=-1;
         supplied_animator_=fallback_animator_native_=0;fallback_animator_=0;
     }
     void update(Api& api,void* managed_camera,void* owner,void* fp,void* weapon,bool enabled,float distance,int frame,double time,void* managed_animator=nullptr){
@@ -320,7 +325,7 @@ public:
         model_.update(api,managed_animator,body_view,time);
         for(auto r:model_.primary())if(reinterpret_cast<uintptr_t>(objects.live(r.id))==r.native)add_renderer(api,r.id,false,true);
         discover(api,owner,fp,weapon,animator,time);body_meshes=0;
-        uint32_t layers=0;bool body_on_fp_layer=false;
+        uint32_t layers=0;bool body_on_fp_layer=false;unsigned drawn=0;
         for(auto it=renderers_.begin();it!=renderers_.end();){
             void* p=objects.live(it->id);
             if(reinterpret_cast<uintptr_t>(p)!=it->native){it=renderers_.erase(it);continue;}
@@ -337,6 +342,7 @@ public:
                 // the ones without it stayed visible: baked occlusion data hides the body
                 // from the shifted camera position.
                 if(objects.occlusion&&objects.set_occlusion&&objects.occlusion(p)){objects.set_occlusion(p,false);it->occlusion_owned=true;}
+                if(api.is_visible&&api.is_visible(p))++drawn;
                 // The game may move the model between layers (hidden / shown);
                 // use the layer it has right now, not the one seen at discovery.
                 it->layer=api.layer(go);
@@ -344,6 +350,16 @@ public:
                 ++body_meshes;
             }
             ++it;
+        }
+        // Per-renderer occlusion is off but the engine still culls every body mesh:
+        // fall back to switching occlusion culling off on the camera while this lasts.
+        if(api.is_visible&&body_view&&body_meshes){
+            if(drawn)invisible_since_=-1;
+            else if(invisible_since_<0)invisible_since_=time;
+            else if(time-invisible_since_>1.5&&!camera_occlusion_owned_&&api.camera_occlusion&&api.set_camera_occlusion){
+                camera_occlusion_original_=api.camera_occlusion(camera);
+                if(camera_occlusion_original_){api.set_camera_occlusion(camera,false);camera_occlusion_owned_=true;}
+            }
         }
         const int current=api.mask(camera);
         if(!mask_owned_||current!=applied_mask_)original_mask_=current;
@@ -354,9 +370,9 @@ public:
         if(time>=next_report_){
             next_report_=time+2.;
             int used=std::snprintf(report_,sizeof(report_),
-                "TP travel=%.2f wanted=%.2f body_view=%d renderers=%zu body_meshes=%u primary=%zu fallback_animator=%d fp_root=%d mask=%08x->%08x head=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f) |",
+                "TP travel=%.2f wanted=%.2f body_view=%d renderers=%zu body_meshes=%u primary=%zu fallback_animator=%d fp_root=%d mask=%08x->%08x cam_occlusion_off=%d drawn=%u head=(%.1f,%.1f,%.1f) cam=(%.1f,%.1f,%.1f) |",
                 travel,wanted,body_view,renderers_.size(),body_meshes,model_.primary().size(),fallback_animator_!=0,fp_root_known_,
-                uint32_t(original_mask_),uint32_t(applied_mask_),baseline_.x,baseline_.y,baseline_.z,applied_.x,applied_.y,applied_.z);
+                uint32_t(original_mask_),uint32_t(applied_mask_),int(camera_occlusion_owned_),drawn,baseline_.x,baseline_.y,baseline_.z,applied_.x,applied_.y,applied_.z);
             unsigned shown=0;
             for(const auto& r:renderers_){
                 if(shown++>=8||used<0||size_t(used)>=sizeof(report_)-80)break;
