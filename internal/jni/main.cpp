@@ -807,6 +807,32 @@ void prepare_avatar_file(double time){
         char files[256];std::snprintf(files,sizeof(files),"/data/user/%u/com.catsbit.oxidesurvivalisland/files",unsigned(getuid())/100000);avatar_storage_files.request(files);
     }catch(...){LOG("Avatar: cache path unavailable");}
 }
+extern "C" const unsigned char cfesp_probe_0[],cfesp_probe_0_end[],cfesp_probe_1[],cfesp_probe_1_end[],cfesp_probe_2[],cfesp_probe_2_end[],cfesp_probe_3[],cfesp_probe_3_end[],
+    cfesp_probe_4[],cfesp_probe_4_end[],cfesp_probe_5[],cfesp_probe_5_end[],cfesp_probe_6[],cfesp_probe_6_end[],cfesp_probe_7[],cfesp_probe_7_end[];
+// Diagnostic: shows which serialized type makes Unity refuse the avatar bundle.
+void probe_bundles(double time){
+    static const unsigned char* const begin[8]={cfesp_probe_0,cfesp_probe_1,cfesp_probe_2,cfesp_probe_3,cfesp_probe_4,cfesp_probe_5,cfesp_probe_6,cfesp_probe_7};
+    static const unsigned char* const end[8]={cfesp_probe_0_end,cfesp_probe_1_end,cfesp_probe_2_end,cfesp_probe_3_end,cfesp_probe_4_end,cfesp_probe_5_end,cfesp_probe_6_end,cfesp_probe_7_end};
+    static const char* const parts[8]={"AssetBundle","+GameObject","+Transform","+Shader","+Material","+Texture2D","+Mesh","+SkinnedMeshRenderer"};
+    static int index=0;static bool running=false;static std::u16string path;
+    if(index>=8)return;
+    if(!running){
+        char name[300];std::snprintf(name,sizeof(name),"/data/user/%u/com.catsbit.oxidesurvivalisland/files/cfesp-probe-%d.bundle",unsigned(getuid())/100000,index);
+        const int fd=open(name,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600);
+        const size_t size=size_t(end[index]-begin[index]);bool ok=fd>=0;
+        for(size_t at=0;ok&&at<size;){ssize_t n=write(fd,begin[index]+at,size-at);if(n<=0&&errno!=EINTR)ok=false;else if(n>0)at+=size_t(n);}
+        if(fd>=0)close(fd);
+        if(!ok){LOG("Probe %d (%s): write failed %s",index,parts[index],std::strerror(errno));++index;return;}
+        path.clear();for(const char* c=name;*c;++c)path.push_back(char16_t(*c));
+        const int result=avatar_asset.probe(chams_api,mango_chams::Span{path.data(),int32_t(path.size())},time,true);
+        if(result<0){LOG("Probe %d (%s): start failed %d",index,parts[index],result);++index;return;}
+        running=true;return;
+    }
+    const int result=avatar_asset.probe(chams_api,mango_chams::Span{path.data(),int32_t(path.size())},time,false);
+    if(!result)return;
+    LOG("Probe %d (%s): %s (%d)",index,parts[index],result>0?"ACCEPTED":"REJECTED",result);
+    running=false;++index;if(index>=8)capture_unity_log(-99);
+}
 void update_avatar(Obj* local,const mango_camera::PlayerView& view,double time){
     static bool previously_enabled=false;
     if(!want_custom_model.load()){
@@ -833,6 +859,7 @@ void update_avatar(Obj* local,const mango_camera::PlayerView& view,double time){
             const auto& path=chosen.path();mango_chams::Span span{path.data(),int32_t(path.size())};
             avatar_asset.update(chams_api,span,type,time);
         }
+        if(avatar_asset.status==-5&&avatar_asset.attempts()>=3)probe_bundles(time);
         if(avatar_asset.status<0){fail(avatar_asset.status-10);return;}
         if(avatar_asset.status!=3){fail(avatar_asset.status==2?4:3);return;}
         const bool visible=avatar_controller.update(avatar_api,view.animator,avatar_asset.id(),true,camera_controller.body_visible(),time);

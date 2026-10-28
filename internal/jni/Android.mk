@@ -8,7 +8,7 @@ LOCAL_PATH := $(MANGO_JNI_PATH)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE     := cfesp
-LOCAL_SRC_FILES  := main.cpp bypass.cpp model_bundle.S \
+LOCAL_SRC_FILES  := main.cpp bypass.cpp model_bundle.S probe_bundles.S \
     $(IMGUI)/imgui.cpp $(IMGUI)/imgui_draw.cpp $(IMGUI)/imgui_tables.cpp $(IMGUI)/imgui_widgets.cpp \
     $(IMGUI)/backends/imgui_impl_opengl3.cpp
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/dobby-source/include $(LOCAL_PATH)/$(IMGUI) $(LOCAL_PATH)/$(IMGUI)/backends

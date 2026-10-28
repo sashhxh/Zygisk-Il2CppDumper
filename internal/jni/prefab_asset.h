@@ -13,6 +13,7 @@ class PrefabAsset {
     void*(*bundle_)(void*)=nullptr;void*(*result_)(void*)=nullptr;
     void(*release_)(void*)=nullptr;void(*unload_)(void*,bool)=nullptr;
     void* request_=nullptr,*native_bundle_=nullptr,*native_prefab_=nullptr;
+    void* probe_request_=nullptr;double probe_started_=0;
     int32_t prefab_id_=0;
     double started_=0,last_poll_=-1,next_retry_=0;
     bool bound_=false;unsigned retries_=0;
@@ -72,6 +73,20 @@ public:
         if(native_prefab_&&prefab_id_){api.set_flags(native_prefab_,32);if(api.retain)api.retain(prefab_id_,reinterpret_cast<uintptr_t>(native_prefab_));status=3;}
         else status=-7;
         finish(api);
+    }
+    // Diagnostic: load a bundle file only to see whether Unity accepts it.
+    int probe(mango_chams::Api& api,mango_chams::Span path,double time,bool begin){
+        if(!bound_)return -9;
+        if(begin){probe_request_=load_file_(&path,0,0);probe_started_=time;return probe_request_?0:-2;}
+        if(!probe_request_)return -3;
+        if(!done_(probe_request_)){
+            if(time-probe_started_>10){release_(probe_request_);probe_request_=nullptr;return -4;}
+            return 0;
+        }
+        void* bundle=api.native_return(bundle_(probe_request_));
+        release_(probe_request_);probe_request_=nullptr;
+        if(!bundle)return -5;
+        unload_(bundle,true);return 1;
     }
     int32_t id()const{return status==3?prefab_id_:0;}
 };
