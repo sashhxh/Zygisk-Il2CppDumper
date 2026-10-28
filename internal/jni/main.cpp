@@ -807,15 +807,38 @@ void prepare_avatar_file(double time){
         char files[256];std::snprintf(files,sizeof(files),"/data/user/%u/com.catsbit.oxidesurvivalisland/files",unsigned(getuid())/100000);avatar_storage_files.request(files);
     }catch(...){LOG("Avatar: cache path unavailable");}
 }
+// The bundle is rejected as "older than the runtime": report which Unity the game really runs.
+void log_unity_version(){
+    static bool done=false;if(done)return;done=true;
+    FILE* maps=std::fopen("/proc/self/maps","r");if(!maps){LOG("Unity version: no maps");return;}
+    char line[600],path[600]={0};
+    while(std::fgets(line,sizeof(line),maps)){const char* at=std::strstr(line,"libunity.so");if(!at)continue;const char* slash=std::strchr(line,'/');if(slash){std::snprintf(path,sizeof(path),"%s",slash);size_t n=std::strlen(path);while(n&&(path[n-1]=='\n'))path[--n]=0;break;}}
+    std::fclose(maps);
+    if(!path[0]){LOG("Unity version: libunity.so not mapped");return;}
+    FILE* file=std::fopen(path,"rb");if(!file){LOG("Unity version: cannot open %s: %s",path,std::strerror(errno));return;}
+    LOG("Unity version: scanning %s",path);
+    std::vector<char> buffer(1<<22);size_t keep=0;unsigned found=0;
+    while(found<4){
+        const size_t got=std::fread(buffer.data()+keep,1,buffer.size()-keep,file);if(!got)break;
+        const size_t total=keep+got;
+        for(size_t i=0;i+16<total&&found<4;++i){
+            if(buffer[i]!='6'||buffer[i+1]!='0'||buffer[i+2]!='0'||buffer[i+3]!='0'||buffer[i+4]!='.')continue;
+            size_t j=i+5;while(j<total&&j-i<40&&((buffer[j]>='0'&&buffer[j]<='9')||buffer[j]=='.'||buffer[j]=='f'||buffer[j]=='a'||buffer[j]=='b'||buffer[j]=='p'))++j;
+            if(j-i>=9&&j<total&&(buffer[j]==0||buffer[j]==' ')){std::string text(buffer.data()+i,j-i);LOG("Unity version string: %s",text.c_str());++found;i=j;}
+        }
+        keep=total>64?64:total;std::memmove(buffer.data(),buffer.data()+total-keep,keep);
+    }
+    std::fclose(file);
+}
 extern "C" const unsigned char cfesp_probe_0[],cfesp_probe_0_end[],cfesp_probe_1[],cfesp_probe_1_end[],cfesp_probe_2[],cfesp_probe_2_end[],cfesp_probe_3[],cfesp_probe_3_end[],
     cfesp_probe_4[],cfesp_probe_4_end[],cfesp_probe_5[],cfesp_probe_5_end[],cfesp_probe_6[],cfesp_probe_6_end[],cfesp_probe_7[],cfesp_probe_7_end[];
 // Diagnostic: shows which serialized type makes Unity refuse the avatar bundle.
 void probe_bundles(double time){
-    static const unsigned char* const begin[8]={cfesp_probe_0,cfesp_probe_1,cfesp_probe_2,cfesp_probe_3,cfesp_probe_4,cfesp_probe_5,cfesp_probe_6,cfesp_probe_7};
-    static const unsigned char* const end[8]={cfesp_probe_0_end,cfesp_probe_1_end,cfesp_probe_2_end,cfesp_probe_3_end,cfesp_probe_4_end,cfesp_probe_5_end,cfesp_probe_6_end,cfesp_probe_7_end};
-    static const char* const parts[8]={"AssetBundle","+GameObject","+Transform","+Shader","+Material","+Texture2D","+Mesh","+SkinnedMeshRenderer"};
+    static const unsigned char* const begin[9]={cfesp_probe_0,cfesp_probe_1,cfesp_probe_2,cfesp_probe_3,cfesp_probe_4,cfesp_probe_5,cfesp_probe_6,cfesp_probe_7,kChamsShaderBundle};
+    static const unsigned char* const end[9]={cfesp_probe_0_end,cfesp_probe_1_end,cfesp_probe_2_end,cfesp_probe_3_end,cfesp_probe_4_end,cfesp_probe_5_end,cfesp_probe_6_end,cfesp_probe_7_end,kChamsShaderBundle+kChamsShaderBundleSize};
+    static const char* const parts[9]={"AssetBundle","+GameObject","+Transform","+Shader","+Material","+Texture2D","+Mesh","+SkinnedMeshRenderer","chams shader bundle (known good)"};
     static int index=0;static bool running=false;static std::u16string path;
-    if(index>=8)return;
+    if(index>=9)return;
     if(!running){
         char name[300];std::snprintf(name,sizeof(name),"/data/user/%u/com.catsbit.oxidesurvivalisland/files/cfesp-probe-%d.bundle",unsigned(getuid())/100000,index);
         const int fd=open(name,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600);
@@ -831,7 +854,7 @@ void probe_bundles(double time){
     const int result=avatar_asset.probe(chams_api,mango_chams::Span{path.data(),int32_t(path.size())},time,false);
     if(!result)return;
     LOG("Probe %d (%s): %s (%d)",index,parts[index],result>0?"ACCEPTED":"REJECTED",result);
-    running=false;++index;if(index>=8)capture_unity_log(-99);
+    running=false;++index;if(index>=9)capture_unity_log(-99);
 }
 void update_avatar(Obj* local,const mango_camera::PlayerView& view,double time){
     static bool previously_enabled=false;
@@ -859,6 +882,7 @@ void update_avatar(Obj* local,const mango_camera::PlayerView& view,double time){
             const auto& path=chosen.path();mango_chams::Span span{path.data(),int32_t(path.size())};
             avatar_asset.update(chams_api,span,type,time);
         }
+        if(avatar_asset.status<0)log_unity_version();
         if(avatar_asset.status==-5&&avatar_asset.attempts()>=3)probe_bundles(time);
         if(avatar_asset.status<0){fail(avatar_asset.status-10);return;}
         if(avatar_asset.status!=3){fail(avatar_asset.status==2?4:3);return;}
