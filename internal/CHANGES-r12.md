@@ -93,3 +93,10 @@
 - Теперь пишем: `TP camera near/far/fov`, `TP clip x y z w` — куда центр bounds тела попадает в frustum по culling-матрице (внутри: |x|,|y|<=w, 0<=z<=w),
   `Chams: ... drawn_by_engine=N` — сколько рендереров чужих игроков движок реально рисует (контроль для `isVisible`),
   и хуки `Camera.cullingMatrix=` / `Camera.ResetCullingMatrix` (вызовы игры при включённом ТП).
+
+## r12j
+- Лог r12i: контроль `drawn_by_engine=8` (чужие рендереры движок рисует — `isVisible` рабочий), центр тела внутри frustum (`TP clip x=-0.17 y=-1.56 w=3.54`),
+  near=0.15 far=1000 fov=62, игра `Camera.cullingMatrix` не трогает. Движок режет именно тело.
+- Хуки icall для `GameObject.SetActive` / `set_layer` / `Camera.set_cullingMask` пропускались (заглушки по 4 байта). Теперь хукаются IL2CPP-обёртки по RVA из дампа
+  (`GameObject.SetActive` 0xD4BB8CC, `set_layer` 0xD4BB690, `Camera.set_cullingMask` 0xD4351C0): `Guard: GameObject.SetActive(0) BLOCKED callers=+0x…`,
+  где `callers` уже игровой метод, который скрывает тело (его RVA ищется в `dump.cs`).

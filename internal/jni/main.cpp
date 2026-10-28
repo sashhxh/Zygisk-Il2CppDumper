@@ -78,7 +78,7 @@ static void mango_log(const char* format,...){
 namespace mango {
 constexpr const char* package="com.catsbit.oxidesurvivalisland";
 // Identifies the loaded library in the startup log.
-const char revision_marker[]="MANGOCHEAT_REV=r12i-frustum-diag";
+const char revision_marker[]="MANGOCHEAT_REV=r12j-wrapper-guard";
 constexpr size_t max_players=256, bone_count=17;
 struct V2{float x=0,y=0;};
 struct V3{float x=0,y=0,z=0;};
@@ -848,6 +848,29 @@ void hook_reset_culling_matrix(void* self){
     if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(self)==camera_controller.camera_native())guard_note("Camera.ResetCullingMatrix",0,false);
     orig_reset_culling_matrix(self);
 }
+// IL2CPP wrappers (RVAs from the 1.16.11978 dump): the icall stubs for these are too short to
+// hook, but the managed wrappers are ordinary functions and their return address is the game
+// method that made the call.
+using WrapperBoolFn=void(*)(void*,bool,const void*);using WrapperIntFn=void(*)(void*,int,const void*);
+WrapperBoolFn orig_go_set_active=nullptr;WrapperIntFn orig_go_set_layer=nullptr,orig_camera_set_mask=nullptr;
+void* managed_native(void* managed){
+    if(!managed)return nullptr;
+    void* native=nullptr;std::memcpy(&native,static_cast<unsigned char*>(managed)+0x10,sizeof(native));return native;
+}
+void hook_go_set_active(void* self,bool value,const void* method){
+    if(guard_set.active&&own_calls==0&&guarded(managed_native(self),true)){
+        const bool block=!value;guard_note("GameObject.SetActive",value,block);if(block){guard_blocked.fetch_add(1);return;}
+    }
+    orig_go_set_active(self,value,method);
+}
+void hook_go_set_layer(void* self,int value,const void* method){
+    if(guard_set.active&&own_calls==0&&guarded(managed_native(self),true)){guard_note("GameObject.layer",value,true);guard_blocked.fetch_add(1);return;}
+    orig_go_set_layer(self,value,method);
+}
+void hook_camera_set_mask(void* self,int value,const void* method){
+    if(guard_set.active&&own_calls==0&&reinterpret_cast<uintptr_t>(managed_native(self))==camera_controller.camera_native())guard_note("Camera.cullingMask",value,false);
+    orig_camera_set_mask(self,value,method);
+}
 void hook_set_active(void* self,bool value){
     if(guarded(self,true)){const bool block=!value;guard_note("GameObject.SetActive",value,block);if(block){guard_blocked.fetch_add(1);return;}}
     orig_set_active(self,value);
@@ -898,6 +921,18 @@ void install_guard_hooks(mango_chams::Api::Resolve resolve){
         {"UnityEngine.GameObject::set_layer_Injected(System.IntPtr,System.Int32)",reinterpret_cast<void*>(hook_set_layer),reinterpret_cast<void**>(&orig_set_layer)},
         {"UnityEngine.Camera::set_cullingMask_Injected(System.IntPtr,System.Int32)",reinterpret_cast<void*>(hook_camera_mask),reinterpret_cast<void**>(&orig_camera_mask)},
     };
+    struct Wrapper {const char* name;uintptr_t rva;void* replacement;void** original;};
+    const Wrapper wrappers[]={
+        {"GameObject.SetActive",0xD4BB8CC,reinterpret_cast<void*>(hook_go_set_active),reinterpret_cast<void**>(&orig_go_set_active)},
+        {"GameObject.set_layer",0xD4BB690,reinterpret_cast<void*>(hook_go_set_layer),reinterpret_cast<void**>(&orig_go_set_layer)},
+        {"Camera.set_cullingMask",0xD4351C0,reinterpret_cast<void*>(hook_camera_set_mask),reinterpret_cast<void**>(&orig_camera_set_mask)},
+    };
+    for(const auto& wrapper:wrappers){
+        void* target=reinterpret_cast<void*>(api.base+wrapper.rva);
+        if(!hook_target(target)){LOG("Guard: skipped wrapper %s (unexpected prologue)",wrapper.name);continue;}
+        const int result=hook(target,wrapper.replacement,wrapper.original);
+        LOG("Guard: hook wrapper %s -> %d (il2cpp+0x%lx)",wrapper.name,result,static_cast<unsigned long>(wrapper.rva));
+    }
     for(const auto& entry:entries){
         void* icall=resolve(entry.name);
         if(!icall){LOG("Guard: icall missing: %s",entry.name);continue;}

@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Standalone launcher v8 / r12i-frustum-diag for Oxide 1.16.11978 ARM64.
+# Standalone launcher v8 / r12j-wrapper-guard for Oxide 1.16.11978 ARM64.
 # Android ARM64, root; both native files are embedded below.
 set -eu
 
@@ -76,7 +76,7 @@ find_game_pid() {
 }
 
 restart_game() {
-    printf '%s\n' 'Лоадер v8 (r12i-frustum-diag): перезапускаю Oxide с -force-gles30. Текущая сессия игры закроется.'
+    printf '%s\n' 'Лоадер v8 (r12j-wrapper-guard): перезапускаю Oxide с -force-gles30. Текущая сессия игры закроется.'
     find_game_pid
     if [ -n "$GAME_PID" ]; then
         printf 'Останавливаю старый процесс: PID %s\n' "$GAME_PID"
