@@ -179,13 +179,10 @@ if "$RUNTIME/cfinject" "$PACKAGE" "$LIBRARY"; then
         LOG_FILE="/data/user/$USER_ID/$PACKAGE/files/mango_log.txt"
         printf 'Лог-файл: %s\n' "$LOG_FILE"
         printf 'Скопировать в Download: su -c "cp %s /sdcard/Download/mango_log.txt"\n' "$LOG_FILE"
-        sleep 6
-        if [ -r "$LOG_FILE" ]; then
-            cp "$LOG_FILE" /sdcard/Download/mango_log.txt 2>/dev/null \
-                && printf '%s\n' 'Лог скопирован: /sdcard/Download/mango_log.txt' || :
-        else
-            printf '%s\n' 'Лог-файл пока не создан: библиотека ещё не стартовала или нет доступа к files/.'
-        fi
+        # Keep /sdcard/Download/mango_log.txt current for 20 minutes (one copy used to freeze
+        # at the first 6 seconds and was mistaken for the whole log).
+        nohup sh -c 'i=0; while [ "$i" -lt 400 ]; do sleep 3; cp "$1" /sdcard/Download/mango_log.txt 2>/dev/null; i=$((i+1)); done' sh "$LOG_FILE" >/dev/null 2>&1 &
+        printf '%s\n' 'Лог копируется в /sdcard/Download/mango_log.txt каждые 3 с (20 минут).'
     else
         fail 'После загрузки процесс завершился или библиотека отсутствует. Нужен logcat.'
     fi
