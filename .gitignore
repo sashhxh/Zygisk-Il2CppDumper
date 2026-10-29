@@ -12,5 +12,5 @@
 /out
 .externalNativeBuild
 .cxx
-int_src/internal/libs/
-int_src/internal/obj/
+int_src/
+start.sh
