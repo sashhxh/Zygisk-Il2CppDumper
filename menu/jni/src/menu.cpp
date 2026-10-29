@@ -9,11 +9,9 @@ static ImFont* g_fontBig  = nullptr;
 
 void LoadFonts() {
     ImGuiIO& io = ImGui::GetIO();
-    ImFontConfig cfg; cfg.PixelSnapH = true;
-    g_fontMain = io.Fonts->AddFontFromMemoryCompressedTTF(RobotoFont_compressed_data,
-                                                         RobotoFont_compressed_size, 18.f, &cfg);
-    g_fontBig  = io.Fonts->AddFontFromMemoryCompressedTTF(RobotoFont_compressed_data,
-                                                         RobotoFont_compressed_size, 24.f, &cfg);
+    ImFontConfig cfg; cfg.PixelSnapH = true; cfg.FontDataOwnedByAtlas = false;
+    g_fontMain = io.Fonts->AddFontFromMemoryTTF((void*)RobotoFont, RobotoFont_size, 18.f, &cfg);
+    g_fontBig  = io.Fonts->AddFontFromMemoryTTF((void*)RobotoFont, RobotoFont_size, 24.f, &cfg);
     io.FontDefault = g_fontMain;
 }
 
@@ -171,8 +169,8 @@ void RenderMenu() {
     static const char* tabs[] = {"Visual", "Combat", "Misc", "Settings"};
     ui::TabBarAnimated(tabs, IM_ARRAYSIZE(tabs), &g_tab);
 
-    ImGui::BeginChild("##body", {0, 0}, false,
-        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_AlwaysUseWindowPadding);
+    ImGui::BeginChild("##body", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_NoBackground);
     switch (g_tab) {
         case 0: TabVisual();   break;
         case 1: TabCombat();   break;
