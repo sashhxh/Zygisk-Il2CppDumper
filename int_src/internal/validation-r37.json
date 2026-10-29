@@ -1,0 +1,24 @@
+{
+  "revision": "r37-auto-tools",
+  "game_version": "1.16.11978",
+  "game_build_id": "46686291bd5f3e0f3505d35d727c7ef2e9f36446",
+  "build": "passed with NDK r27d, arm64-v8a, android-24",
+  "native_code_signatures_verified": 116,
+  "host_tests": "28 suites passed with ASan/UBSan, detect_leaks=0 for this ptrace environment",
+  "menu_tests": "passed: chams and World at 5 resolutions; 12 independent toggles; all farm and run statuses including automatic tool selection",
+  "launcher_syntax_modes_payloads": "passed",
+  "farm_preparation": "native PlayerWeapon.viU() once for each equipped FP object/native/Item identity, after readiness and before first native harvest",
+  "local_swing_entrypoint_called": false,
+  "attack_input_simulated_for_farm": false,
+  "auto_run": "native reactive movement plus PlayerInput snapshot, normal sprint handlers, nearest matching resource, arrival/manual/menu/death/stale/stall stops, short obstacle and ground probes",
+  "settings": "EXTRAS_V2 with EXTRAS_V1 migration; Auto Run defaults off for old configs",
+  "android_device_tested": false,
+  "server_resource_credit_tested": false,
+  "limitations": [
+    "Network tool preparation and movement still need device/server validation",
+    "Auto Run uses local steering, not global route finding",
+    "Automatic equip from inventory/backpack and tool name aliases need device/server validation"
+  ],
+  "start_sh_sha256": "f3f2905b9fcff4c3d88a004a4402d281d048473fea61f8d28e5024ac8ba200a2",
+  "auto_tools": "Auto Run scans owned inventory/hotbar/backpack cells; usable axe for wood, usable pickaxe for ore; mega preferred, ordinary fallback; normal ChangeEquippedItem with native cell report; waits for observed FP Item, at most one selection request per second"
+}

@@ -1,0 +1,26 @@
+{
+  "revision": "r34-no-swing-farm",
+  "game_version": "1.16.11978",
+  "game_build_id": "46686291bd5f3e0f3505d35d727c7ef2e9f36446",
+  "android_build": "passed with NDK r27d, arm64-v8a, android-24",
+  "host_tests": "25 suites passed (ASan/UBSan, detect_leaks=0 due to ptrace environment)",
+  "launcher_syntax": "passed",
+  "launcher_modes": "passed",
+  "payload_hashes_architecture_revision": "passed",
+  "runtime_code_signatures_verified": 104,
+  "farm_uses_attack_input": false,
+  "farm_redirects_view_ray": false,
+  "farm_plays_local_swing": false,
+  "farm_plays_local_impact_effects": false,
+  "farm_transport": "native PlayerInteraction.vUQ(uint,MineableObjectHitInfoCompact)",
+  "farm_requires_equipped_matching_tool": true,
+  "android_device_tested": false,
+  "server_resource_credit_tested": false,
+  "limitations": [
+    "Harvest request sent confirms dispatch only, not server acceptance",
+    "Server tool, distance, ammo, reward and cooldown checks remain authoritative"
+  ],
+  "start_sh_sha256": "d1cd06f26e5e1265faf5b289841fa9b3c209fd57e1bb48370619dcae0ef32956",
+  "library_sha256": "c955d0fc30abfa616bf8291bb7b15e6bb4854130131818fd4a85942328fd9fba",
+  "menu_tests": "passed: chams, World controls and all farm statuses at five resolutions"
+}

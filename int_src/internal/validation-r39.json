@@ -1,0 +1,24 @@
+{
+  "revision": "r39-hotbar-tools",
+  "game_version": "1.16.11978",
+  "game_build_id": "46686291bd5f3e0f3505d35d727c7ef2e9f36446",
+  "build": "passed with NDK r27d, arm64-v8a, android-24",
+  "native_code_signatures_verified": 114,
+  "host_tests": "27 suites passed with ASan/UBSan; auto_tools rerun and passed after adding stale selection recovery; detect_leaks=0 for this ptrace environment",
+  "menu_tests": "passed: chams and World at 5 resolutions; independent Auto Tool toggle; all farm/tool statuses with inventory counters; no intersections/clipping",
+  "launcher_syntax_modes_payloads": "passed",
+  "auto_run_removed": true,
+  "automated_movement_or_sprint": false,
+  "hotbar": "Scan Hotbar ordered Slot list independently of aggregate Cells; preserve zero-based slot route; validate index/slot/cell/item at dispatch; normal Hotbar.cAG(index,true); wait for actual FP item",
+  "stale_selection_recovery": "If EquippedItem is set but FP item is absent, permit normal hotbar reselect after 3 seconds; never reselect an item already held",
+  "diagnostics": "Preserve last result while menu open; display slot/item/tool counts and scan/equip statuses; bounded logcat scan summaries",
+  "farm": "Existing tool activation without local attack input and live weakspot selection retained",
+  "settings": "EXTRAS_V3; V2 Auto Run migrates to Auto Tool; V1 leaves Auto Tool off",
+  "android_device_tested": false,
+  "server_resource_credit_tested": false,
+  "r38_failure_runtime_cause_confirmed": false,
+  "limitations": [
+    "Exact runtime failure from r38 is unconfirmed without device state; normal hotbar path and recovery require device validation"
+  ],
+  "start_sh_sha256": "eb0979ca0b863218dbf523d16fc4e665fa81662de33e1afe2f7da8f31c58b909"
+}

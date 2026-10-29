@@ -1,0 +1,19 @@
+{
+  "revision": "r33-proximity-farm",
+  "changes": [
+    "Start tool input from the selected nearby resource instead of a cached camera collider hit",
+    "Recheck current player-to-resource distance before requesting tool input",
+    "Retain existing tool ray redirection without camera rotation"
+  ],
+  "host_tests": "24 passed with ASan and UBSan; leak detection disabled because LeakSanitizer cannot run under ptrace in this environment",
+  "android_build": "Not run: Android NDK not installed",
+  "android_device_tested": false,
+  "server_harvesting_tested": false,
+  "manual_checks": [
+    "Enable Magic Farm, select resource types, equip a matching axe or pickaxe and close the menu",
+    "Within Farm Distance, look away or put the resource behind the player: verify swings and actual resource gathering",
+    "Leave the radius, open the menu or switch tools: verify automatic swings stop",
+    "Destroy the resource: verify selection clears or moves to another nearby resource"
+  ],
+  "menu_tests": "Passed: chams and World menu; World tested at five resolutions"
+}
